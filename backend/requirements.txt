@@ -1,0 +1,28 @@
+fastapi>=0.115.0
+uvicorn>=0.26.0
+langchain>=0.3.0,<0.4.0
+langchain-core>=0.3.0,<0.4.0
+langchain-community>=0.3.0,<0.4.0
+langchain-text-splitters>=0.3.0,<0.4.0
+langchain-chroma>=0.1.0
+dashscope>=1.22.0
+sse-starlette>=2.0.0
+python-dotenv>=1.0.0
+pydantic>=2.0
+chromadb>=0.4.22
+python-multipart
+Pillow
+numpy
+requests
+aiofiles
+aiohttp>=3.9.0
+sqlalchemy>=2.0.0
+aiosqlite>=0.19.0
+passlib[bcrypt]>=1.7.4
+python-jose[cryptography]>=3.3.0
+pypdf
+python-docx
+python-pptx
+markdown
+# Optional but recommended for DOC/DOCX compatibility
+# docx2txt

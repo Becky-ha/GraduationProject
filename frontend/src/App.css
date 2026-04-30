@@ -1,0 +1,185 @@
+/* 基础布局样式 */
+
+.App {
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    background: linear-gradient(135deg, #f6f8fd 0%, #f1e4ff 100%);
+}
+
+.App-header-minimal {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 20px;
+    background: rgba(255, 255, 255, 0.7);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.app-name {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #6c5ce7;
+    margin-right: 15px;
+}
+
+.nav-link {
+    font-size: 0.9rem;
+    color: #4a5568;
+    font-weight: 600;
+    text-decoration: none;
+    padding: 5px 12px;
+    border-radius: 6px;
+    transition: all 0.2s;
+    cursor: pointer;
+}
+
+.nav-link:hover {
+    background: rgba(108, 92, 231, 0.1);
+    color: #6c5ce7;
+}
+
+.user-menu {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.username {
+    font-size: 0.85rem;
+    color: #4a5568;
+}
+
+.logout-button {
+    background: transparent;
+    color: #6c5ce7;
+    border: 1px solid #6c5ce7;
+    border-radius: 6px;
+    padding: 4px 12px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.logout-button:hover {
+    background: #6c5ce7;
+    color: white;
+}
+
+/* 主体内容样式 */
+
+main {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    position: relative;
+    overflow: hidden;
+}
+
+.chat-main {
+    max-width: 1360px;
+    margin: 0 auto;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center; /* 确保子元素水平居中 */
+}
+
+.admin-main {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    flex-grow: 1;
+}
+
+/* 聊天页面的容器样式 */
+.chat-interface-wrapper {
+    flex-grow: 1;
+    height: 100%;
+    width: 100%;
+    border-radius: 12px;
+    margin: 8px;
+    overflow: hidden;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    background-color: white;
+    border: 1px solid #e0e6ed;
+}
+
+.auth-main {
+    justify-content: center;
+    align-items: center;
+}
+
+.auth-main > div {
+    /* 登录注册页面的容器不应用背景和边框，由 Login.css 控制卡片样式 */
+    flex-grow: 0;
+    height: auto;
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    margin: 0;
+}
+
+
+/* 底部样式 */
+
+.App-footer {
+    background-color: #f1f5f9;
+    color: #64748b;
+    font-size: 0.8rem;
+    padding: 12px;
+    text-align: center;
+    border-top: 1px solid #e2e8f0;
+}
+
+
+/* 响应式设计 */
+
+@media (max-width: 768px) {
+    .App-header {
+        padding: 10px;
+        min-height: 60px;
+    }
+    .App-header h1 {
+        font-size: 1.4rem;
+    }
+    .logo-icon {
+        font-size: 24px;
+    }
+    main>div {
+        margin: 8px;
+        border-radius: 8px;
+    }
+    .header-subtitle {
+        font-size: 0.8rem;
+    }
+}
+
+@media (max-width: 480px) {
+    .App-header h1 {
+        font-size: 1.2rem;
+    }
+    .logo-icon {
+        font-size: 20px;
+    }
+    main>div {
+        margin: 4px;
+        border-radius: 6px;
+    }
+    .header-subtitle {
+        display: none;
+    }
+}
