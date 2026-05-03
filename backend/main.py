@@ -22,7 +22,8 @@ from dashscope import ImageSynthesis
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import select, delete, func
-from models import Base, User as UserModel, ChatHistory as ChatHistoryModel, KnowledgeFile as KnowledgeFileModel, Feedback as FeedbackModel
+from models import Base, User as UserModel, ChatHistory as ChatHistoryModel, KnowledgeFile as KnowledgeFileModel, Feedback as FeedbackModel, QuestionClusterModel
+
 from auth import get_password_hash, verify_password, create_access_token, get_current_user_id, get_current_user_id_optional
 
 # LangChain导入
@@ -243,8 +244,9 @@ class FeedbackOverviewItem(BaseModel):
     dislike_count: int
 
 class HotQuestionItem(BaseModel):
-    question: str
+    represent_question: str
     count: int
+    examples: List[str]
 
 class StreamingCallbackHandler:
     """用于处理流式回调的处理器"""
@@ -554,27 +556,22 @@ RAG_TEMPLATE = """你是一位专业的智能辅助问答助手，名为QAI Bot�
 1. 如果提供的“参考信息”与用户的问题【完全无关】（例如问题是关于做菜、娱乐等，而参考信息是关于学术或技术的），请【忽略】参考信息，直接利用你的通用知识回答。
 2. 只有当参考信息确实能回答用户问题时，才结合参考信息进行回答。
 
-参考信息:
+参考信息：
 {context}
 
-聊天历史:
+聊天历史：
 {history_context}
 
 当前问题: {question}
 
 请遵循以下回答规则：
 1. 使用Markdown格式化你的回答，使其更易于阅读，例如使用标题、列表、粗体、表格等
-2. 确保回答具备准确性和教学可读性，像老师一样循序渐进地讲解
-3. 如有专业术语，可以使用斜体或加粗标记，并简单解释其含义
-4. 提供清晰的结构，使用标题（#、##）分隔不同部分
-5. 根据聊天历史提供连贯性的回答，避免重复已经提供过的信息
-6. **非常重要**：在回答的最后，请基于当前对话内容和参考资料，提供3个用户可能感兴趣的相关追问问题。追问问题请以“你可能还想了解：”作为标题，并使用1. 2. 3. 列表形式列出。
-5. 如果问题超出了参考资料范围，请礼貌地告知并尝试基于通用知识回答
-6. 根据聊天历史提供连贯性的回答，避免重复已经提供过的信息
-7. **非常重要**：在回答的最后，请基于当前对话内容和参考资料，提供3个用户可能感兴趣的相关追问问题。追问问题请以“你可能还想了解：”作为标题，并使用1. 2. 3. 列表形式列出。
+2. 专业术语使用**加粗**或*斜体*并简要解释
+3. 结构化信息使用清晰的标题层级和列表
+4. 重要建议使用加粗标记
+5. 保持助手的耐心和专业，提供友好的回答
 
-回答时，保持专业、耐心和友好的态度。
-"""
+始终保持专业、准确和有帮助的态度。"""
 
 DEFAULT_TEMPLATE = """你是一位专业的智能辅助问答助手，名为"QAI Bot"。你的主要职责是提供准确、有用的信息咨询服务。
 
@@ -779,14 +776,16 @@ def _generate_fallback_response(question, chat_history=None):
         # 尝试从历史记录中提取最近的1-2条用户消息
         recent_user_msgs = []
         for msg in reversed(chat_history):
-            if isinstance(msg, dict) and msg.get("role") == "user":
+            if isinstance(msg, dict):
+                role = msg.get("role", "")
                 content = msg.get("content", "")
-                recent_user_msgs.append(content)
-            elif hasattr(msg, "role") and msg.role == "user":
+            elif hasattr(msg, "role") and hasattr(msg, "content"):
+                role = msg.role
                 content = msg.content
-                recent_user_msgs.append(content)
-            if len(recent_user_msgs) >= 2:
-                break
+            else:
+                continue
+            role_name = "用户" if role == "user" else "AI助手"
+            recent_user_msgs.append(f"{role_name}: {content}")
         
         if recent_user_msgs:
             history_summary = "、".join(recent_user_msgs[:2][::-1])
@@ -1435,7 +1434,7 @@ async def chat_stream(
 
                 except Exception as e:
                     yield {"event": "error", "data": json.dumps({"error": str(e)})}
-            
+
             except Exception as e:
                 error_msg = f"流式响应错误: {str(e)}"
                 print(error_msg)
@@ -1674,596 +1673,90 @@ async def delete_conversation(
         )
 
 
-# --- 反馈模块开始 ---
-    file_ext = os.path.splitext(file.filename)[1] if file.filename else ".jpg"
-    file_name = f"{uuid.uuid4()}{file_ext}"
-    file_path = os.path.join(UPLOAD_DIR, file_name)
-    
-    # 保存文件
-    async with aiofiles.open(file_path, 'wb') as out_file:
-        # 读取并写入文件内容
-        content = await file.read()
-        await out_file.write(content)
-    
-    return file_path
+# --- 语义聚类逻辑开始 ---
 
-# 使用DashScope API进行多模态请求
-async def call_dashscope_multimodal(text: str, image_path: str, history: List[Dict[str, str]] = None) -> str:
-    try:
-        print(f"开始处理多模态请求 - 文本: '{text}', 图片: '{image_path}'")
-        
-        # 直接使用 DashScope API 而不通过 LangChain
-        import dashscope
-        from dashscope import MultiModalConversation
-        
-        # 读取图片为base64
-        with open(image_path, "rb") as img_file:
-            image_content = base64.b64encode(img_file.read()).decode('utf-8')
-        
-        # 添加系统消息
-        system_message = {
-            "role": "system",
-            "content": [
-                {
-                    "text": """你是一位专业的医疗助手，擅长分析医学图像和回答医疗健康相关问题。
-请用简洁专业的语言回答问题，使用Markdown格式美化回复，对于医学专业术语进行解释。
-重要：请确保你只回答用户当前的问题，而不是之前的问题。
-请分析用户提供的图像，并根据图像内容和用户的问题提供专业的医疗建议。"""
-                }
-            ]
-        }
-        
-        # 转换历史消息格式
-        formatted_history = []
-        if history and len(history) > 0:
-            print(f"添加{len(history)}条历史消息")
-            for msg in history:
-                if msg["role"] == "user":
-                    formatted_history.append({
-                        "role": "user",
-                        "content": [{"text": msg["content"]}]
-                    })
-                elif msg["role"] == "assistant":
-                    formatted_history.append({
-                        "role": "assistant",
-                        "content": [{"text": msg["content"]}]
-                    })
-        
-        # 构建当前请求的多模态消息
-        current_message = {
-            "role": "user",
-            "content": [
-                {
-                    "text": text
-                },
-                {
-                    "image": f"data:image/jpeg;base64,{image_content}"
-                }
-            ]
-        }
-        
-        # 如果有历史消息，添加当前消息到历史
-        messages = [system_message] + formatted_history + [current_message]
-        
-        print(f"准备的消息数量: {len(messages)}")
-        
-        # 设置API密钥
-        dashscope.api_key = DASHSCOPE_API_KEY
-        
-        # 调用多模态模型
-        response = MultiModalConversation.call(
-            model='qwen-vl-plus',
-            messages=messages,
-            stream=True,
-            result_format='message',  # 使用消息格式
-            temperature=0.7,
-            max_tokens=1000,
-        )
-        
-        print(f"API调用状态码: {response.status_code}")
-        print(f"API调用请求ID: {response.request_id}")
-        
-        # 检查响应
-        if response.status_code == 200:
-            # 提取文本内容
-            response_message = response.output.choices[0].message
-            print(f"响应角色: {response_message.role}")
-            
-            # 检查内容类型
-            if isinstance(response_message.content, list):
-                # 从多模态响应中提取文本
-                text_parts = []
-                for content_item in response_message.content:
-                    if isinstance(content_item, dict) and 'text' in content_item:
-                        text_parts.append(content_item['text'])
-                response_text = "".join(text_parts)
-            else:
-                # 如果是字符串或其他类型
-                response_text = str(response_message.content)
-            
-            print(f"多模态模型返回的响应: '{response_text[:100]}...' (长度: {len(response_text)})")
-            return response_text
-        else:
-            error_msg = f"API调用失败: {response.status_code}, {response.message}"
-            print(error_msg)
-            return f"处理图片时出错: {error_msg}"
-    
-    except Exception as e:
-        error_msg = f"调用多模态API出错: {str(e)}"
-        print(error_msg)
-        import traceback
-        traceback.print_exc()
-        return f"处理图片时出错: {str(e)}"
+import re
 
-# 新增的多模态聊天API端点（上传表单版本）
-@app.post("/api/chat/multimodal")
-async def chat_multimodal(
-    message: str = Form(...),
-    file: UploadFile = File(...),
-    conversation_id: str = Depends(get_conversation_id)
-):
-    try:
-        print(f"收到多模态表单请求 - 文本: '{message}', 图片: {file.filename}, 会话ID: {conversation_id}")
-        
-        # 保存上传的图片
-        file_path = await save_uploaded_file(file)
-        print(f"图片已保存到: {file_path}")
-        
-        # 获取历史消息
-        history = []
-        if conversation_id in conversation_store:
-            # 获取最近的对话历史（最多10条）
-            history = conversation_store[conversation_id]["messages"][-10:]
-            print(f"获取到会话历史, 共{len(history)}条消息")
-        
-        # 转换为模型可用的格式
-        model_history = []
-        for msg in history:
-            if msg["role"] in ["user", "assistant"]:
-                # 只添加文本消息到历史记录，不添加图片
-                model_history.append({
-                    "role": msg["role"],
-                    "content": msg["content"]
-                })
-        
-        print(f"准备调用多模态模型, 文本: '{message}', 历史消息: {len(model_history)}条")
-        
-        # 调用多模态模型
-        response_text = await call_dashscope_multimodal(message, file_path, model_history)
-        print(f"多模态响应: '{response_text[:100]}...' (长度: {len(response_text)})")
-        
-        # 记录消息到会话历史
-        current_time = datetime.now().isoformat()
-        
-        # 记录用户消息（带图片）
-        user_message = {
-            "role": "user",
-            "content": message,
-            "timestamp": current_time,
-            "image_url": file_path  # 存储图片路径
-        }
-        conversation_store[conversation_id]["messages"].append(user_message)
-        
-        # 记录助手响应
-        assistant_message = {
-            "role": "assistant",
-            "content": response_text,
-            "timestamp": datetime.now().isoformat()
-        }
-        conversation_store[conversation_id]["messages"].append(assistant_message)
-        
-        return {
-            "response": response_text,
-            "conversation_id": conversation_id
-        }
-    
-    except Exception as e:
-        print(f"多模态聊天错误: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": str(e)}
-        )
+def preprocess_text(text: str) -> str:
+    """文本预处理：去除标点、统一大小写、去除空格"""
+    # 去除中英文标点
+    text = re.sub(r'[^\w\s\u4e00-\u9fa5]', '', text)
+    # 统一大小写并去除空格
+    return text.lower().strip()
 
-# 新增的多模态聊天API端点（JSON版本，接受base64图片数据）
-@app.post("/api/chat/multimodal-json")
-async def chat_multimodal_json(
-    request: MultiModalRequest,
-    conversation_id: str = Depends(get_conversation_id)
-):
-    try:
-        print(f"收到多模态JSON请求 - 文本: '{request.message}', 会话ID: {conversation_id}")
-        
-        if not request.image_data:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"error": "未提供图片数据"}
-            )
-        
-        # 解码并保存base64图片
+async def update_question_clusters():
+    """离线任务：更新问题聚类结果"""
+    print("\n>>> [语义聚类] 开始执行增量聚类任务...")
+    async with async_session() as db:
         try:
-            # 处理 data URI 前缀
-            base64_data = request.image_data
-            
-            # 如果包含 data URI 格式，提取 base64 部分
-            if ';base64,' in base64_data:
-                base64_data = base64_data.split(';base64,')[1]
-            elif ',' in base64_data:  # 简单格式 data:,base64数据
-                base64_data = base64_data.split(',')[1]
-                
-            # 解码 base64 数据
-            try:
-                image_bytes = base64.b64decode(base64_data)
-            except Exception as decode_err:
-                print(f"Base64解码失败: {str(decode_err)}")
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"error": f"Base64解码失败: {str(decode_err)}"}
-                )
-            
-            # 验证解码后的数据是否为有效的图像
-            try:
-                from PIL import Image
-                image = Image.open(io.BytesIO(image_bytes))
-                image_format = image.format.lower() if image.format else "jpeg"
-                print(f"图片格式: {image_format}, 尺寸: {image.size}")
-            except Exception as img_err:
-                print(f"图片无效: {str(img_err)}")
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"error": f"提供的数据不是有效的图片: {str(img_err)}"}
-                )
-            
-            # 生成唯一文件名并保存图片
-            file_name = f"{uuid.uuid4()}.{image_format}"
-            file_path = os.path.join(UPLOAD_DIR, file_name)
-            
-            # 保存图片
-            with open(file_path, 'wb') as f:
-                f.write(image_bytes)
-                
-            print(f"Base64图片已保存到: {file_path}")
-        except Exception as e:
-            print(f"保存base64图片失败: {str(e)}")
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"error": f"图片处理失败: {str(e)}"}
+            # 1. 获取所有用户问题
+            result = await db.execute(
+                select(ChatHistoryModel.content)
+                .where(ChatHistoryModel.role == "user", func.length(ChatHistoryModel.content) > 2)
             )
-        
-        # 处理聊天历史
-        chat_history = []
-        if request.chat_history:
-            # 安全地转换Message对象为字典
-            for msg in request.chat_history:
-                try:
-                    # 如果msg已经是字典
-                    if isinstance(msg, dict):
-                        # 确保有role和content字段
-                        if "role" in msg and "content" in msg:
-                            chat_history.append(msg)
-                        else:
-                            print(f"警告: 消息缺少必要字段 {msg}")
-                    # 如果msg是Pydantic模型
-                    elif hasattr(msg, "role") and hasattr(msg, "content"):
-                        chat_history.append({
-                            "role": msg.role,
-                            "content": msg.content,
-                            "timestamp": msg.timestamp if hasattr(msg, "timestamp") else datetime.now().isoformat()
-                        })
-                    else:
-                        print(f"警告: 无法识别的消息类型 {type(msg)}")
-                except Exception as msg_error:
-                    print(f"处理消息时出错: {str(msg_error)}")
-                    # 继续处理下一条消息
-        
-        # 如果请求的历史为空，获取服务器存储的历史
-        if not chat_history and conversation_id in conversation_store:
-            chat_history = conversation_store[conversation_id]["messages"][-10:]
-            print(f"使用服务器存储的历史记录, 共{len(chat_history)}条消息")
-        
-        # 转换为模型可用的格式
-        model_history = []
-        for msg in chat_history:
-            try:
-                if isinstance(msg, dict) and "role" in msg and "content" in msg:
-                    if msg["role"] in ["user", "assistant"]:
-                        # 只添加文本消息到历史记录，不添加图片
-                        model_history.append({
-                            "role": msg["role"],
-                            "content": msg["content"]
-                        })
+            questions = [row[0] for row in result.all()]
+            if not questions:
+                print(">>> [语义聚类] 无有效问题数据，跳过任务")
+                return
+
+            clusters = [] # 存储结构: {"represent": str, "count": int, "examples": set}
+            processed_map = {} # processed_text -> cluster_index
+            
+            for q in questions:
+                p_q = preprocess_text(q)
+                if not p_q: continue
+                
+                # 精确匹配（预处理后）
+                if p_q in processed_map:
+                    idx = processed_map[p_q]
+                    clusters[idx]["count"] += 1
+                    clusters[idx]["examples"].add(q)
                 else:
-                    print(f"跳过不符合格式的消息: {msg}")
-            except Exception as e:
-                print(f"处理历史消息时出错: {str(e)}")
-        
-        print(f"准备调用多模态模型, 文本: '{request.message}', 历史消息: {len(model_history)}条")
-        
-        # 调用多模态模型 - 使用当前的请求消息
-        response_text = await call_dashscope_multimodal(request.message, file_path, model_history)
-        
-        # 确保响应是字符串格式
-        if not isinstance(response_text, str):
-            print(f"警告: 响应不是字符串类型, 而是 {type(response_text)}")
-            if response_text is None:
-                response_text = "图像处理完成，但未能生成回复。"
-            else:
-                try:
-                    # 尝试将非字符串响应转换为字符串
-                    if isinstance(response_text, dict):
-                        if 'content' in response_text:
-                            response_text = str(response_text['content'])
-                        elif 'text' in response_text:
-                            response_text = str(response_text['text'])
-                        else:
-                            response_text = json.dumps(response_text, ensure_ascii=False)
-                    elif isinstance(response_text, list):
-                        # 尝试提取列表中的文本内容
-                        text_items = []
-                        for item in response_text:
-                            if isinstance(item, str):
-                                text_items.append(item)
-                            elif isinstance(item, dict) and 'text' in item:
-                                text_items.append(str(item['text']))
-                        
-                        if text_items:
-                            response_text = '\n'.join(text_items)
-                        else:
-                            response_text = json.dumps(response_text, ensure_ascii=False)
-                    else:
-                        response_text = str(response_text)
-                except Exception as text_err:
-                    print(f"转换响应为字符串时出错: {str(text_err)}")
-                    response_text = "收到响应，但格式无法处理。"
-        
-        print(f"多模态响应: '{response_text[:100]}...' (长度: {len(response_text)})")
-        
-        # 记录消息到会话历史
-        current_time = datetime.now().isoformat()
-        
-        # 记录用户消息（带图片）
-        user_message = {
-            "role": "user",
-            "content": request.message,
-            "timestamp": current_time,
-            "image_url": file_path  # 存储图片路径
-        }
-        conversation_store[conversation_id]["messages"].append(user_message)
-        
-        # 记录助手响应
-        assistant_message = {
-            "role": "assistant",
-            "content": response_text,
-            "timestamp": datetime.now().isoformat()
-        }
-        conversation_store[conversation_id]["messages"].append(assistant_message)
-        
-        return {
-            "response": response_text,
-            "conversation_id": conversation_id
-        }
-    
-    except Exception as e:
-        print(f"多模态JSON请求错误: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": str(e)}
-        )
+                    # 模糊匹配：如果预处理后的字符串包含或非常接近，则归类
+                    matched = False
+                    # 仅对已有的 Top 类别进行检查以保证性能
+                    for cluster in clusters:
+                        p_rep = preprocess_text(cluster["represent"])
+                        if p_q in p_rep or p_rep in p_q:
+                            cluster["count"] += 1
+                            cluster["examples"].add(q)
+                            processed_map[p_q] = clusters.index(cluster)
+                            matched = True
+                            break
+                    
+                    if not matched:
+                        processed_map[p_q] = len(clusters)
+                        clusters.append({
+                            "represent": q,
+                            "count": 1,
+                            "examples": {q}
+                        })
 
-# 定义文生图请求模型类
-class TextToImageRequest(BaseModel):
-    prompt: str  # 图像生成提示词
-    negative_prompt: Optional[str] = None  # 负面提示词，可选
-    n: Optional[int] = 1  # 生成图片数量，默认1张
-    size: Optional[str] = "1024*1024"  # 图片尺寸，默认1024*1024
+            # 排序并取 Top 30
+            clusters.sort(key=lambda x: x["count"], reverse=True)
+            top_clusters = clusters[:30]
 
-# 文生图API端点
-@app.post("/api/text2image")
-async def text2image(
-    request: TextToImageRequest,
-    conversation_id: str = Depends(get_conversation_id)
-):
-    """生成图像的API端点"""
-    try:
-        print(f"收到文生图请求 - 提示词: '{request.prompt}', 会话ID: {conversation_id}")
-        
-        # 调用文生图API
-        rsp = ImageSynthesis.call(
-            api_key=os.getenv("DASHSCOPE_API_KEY"),
-            model="wanx2.1-t2i-turbo",  # 使用wanx2.1-t2i-turbo模型
-            prompt=request.prompt,
-            negative_prompt=request.negative_prompt,
-            n=request.n,
-            size=request.size
-        )
-        print('文生图API响应:', rsp)
-        
-        # 处理响应
-        if rsp.status_code == 200:
-            # 收集大模型返回的原始图片URL
-            original_image_urls = []
+            # 清理旧数据并写入新数据
+            await db.execute(delete(QuestionClusterModel))
+            for c in top_clusters:
+                new_cluster = QuestionClusterModel(
+                    represent_question=c["represent"],
+                    count=c["count"],
+                    examples=json.dumps(list(c["examples"])[:5], ensure_ascii=False)
+                )
+                db.add(new_cluster)
             
-            for result in rsp.output.results:
-                # 直接使用大模型返回的URL
-                original_image_urls.append(result.url)
-                print(f"大模型生成的图片URL: {result.url}")
-            
-            # 记录到会话历史
-            current_time = datetime.now().isoformat()
-            
-            # 记录用户请求
-            user_message = {
-                "role": "user",
-                "content": f"请根据以下描述生成图片: {request.prompt}",
-                "timestamp": current_time
-            }
-            conversation_store[conversation_id]["messages"].append(user_message)
-            
-            # 记录系统响应
-            if original_image_urls:
-                assistant_message = {
-                    "role": "assistant",
-                    "content": f"已根据您的描述生成图片: {request.prompt}",
-                    "timestamp": datetime.now().isoformat(),
-                    "image_url": original_image_urls[0]  # 直接使用大模型返回的URL
-                }
-                conversation_store[conversation_id]["messages"].append(assistant_message)
-            
-            # 返回结果
-            return {
-                "image_urls": original_image_urls,
-                "conversation_id": conversation_id
-            }
-        else:
-            error_msg = f"文生图API调用失败: {rsp.status_code}, {rsp.message}"
-            print(error_msg)
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"error": error_msg}
-            )
-            
-    except Exception as e:
-        print(f"文生图API请求错误: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": str(e)}
-        )
+            await db.commit()
+            print(f">>> [语义聚类] 任务完成，成功识别 {len(top_clusters)} 个核心意图类别")
+        except Exception as e:
+            print(f">>> [语义聚类] 聚类任务失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
-# 管理员：上传知识库文件 (支持多文件)
-@app.post("/api/admin/upload-knowledge")
-async def upload_knowledge(
-    files: List[UploadFile] = File(...),
-    admin: UserModel = Depends(get_current_admin_v2),
-    db: AsyncSession = Depends(get_db)
-):
-    """管理员上传知识库文件并更新 RAG 组件"""
-    try:
-        print(f"管理员 {admin.username} 正在上传 {len(files)} 个知识库文件")
-        
-        saved_files = []
-        file_ids = []
-        for file in files:
-            # 获取文件后缀
-            ext = os.path.splitext(file.filename)[1].lower()
-            if ext not in ['.pdf', '.docx', '.doc', '.pptx', '.ppt', '.md', '.markdown', '.txt', '.json']:
-                print(f"跳过不支持的文件格式: {file.filename}")
-                continue
-            
-            # 生成唯一文件名避免冲突
-            unique_filename = f"{uuid.uuid4()}_{file.filename}"
-            file_path = os.path.join(KNOWLEDGE_DIR, unique_filename)
-            
-            # 保存文件
-            content = await file.read()
-            file_size = len(content)
-            with open(file_path, 'wb') as f:
-                f.write(content)
-            
-            # 保存到数据库，初始状态为 pending
-            db_file = KnowledgeFileModel(
-                filename=file.filename,
-                file_path=file_path,
-                file_type=ext,
-                file_size=file_size,
-                status="pending",
-                progress=0
-            )
-            db.add(db_file)
-            await db.flush() # 获取生成的 ID
-            file_ids.append(db_file.id)
-            saved_files.append(file.filename)
-            
-        await db.commit()
-        print(f"成功保存文件并加入队列: {saved_files}")
-        
-        # 异步启动后台解析任务
-        for f_id in file_ids:
-            asyncio.create_task(process_file_background(f_id))
-            
-        return {"message": f"Successfully uploaded {len(saved_files)} files. Processing in background.", "files": saved_files}
-        
-    except Exception as e:
-        print(f"上传知识库失败: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": str(e)}
-        )
-
-# 管理员：获取知识库文件列表
-@app.get("/api/admin/knowledge-files")
-async def get_knowledge_files(
-    admin: UserModel = Depends(get_current_admin_v2),
-    db: AsyncSession = Depends(get_db)
-):
-    """获取所有知识库文件"""
-    # 状态不再是 active，而是排除 deleted
-    result = await db.execute(
-        select(KnowledgeFileModel)
-        .where(KnowledgeFileModel.status != "deleted")
-        .order_by(KnowledgeFileModel.created_at.desc())
-    )
-    files = result.scalars().all()
-    
-    return [
-        {
-            "id": f.id,
-            "filename": f.filename,
-            "file_type": f.file_type,
-            "file_size": f.file_size,
-            "status": f.status,
-            "progress": f.progress,
-            "error_message": f.error_message,
-            "created_at": f.created_at.isoformat()
-        }
-        for f in files
-    ]
-
-# 管理员：删除知识库文件
-@app.delete("/api/admin/knowledge-files/{file_id}")
-async def delete_knowledge_file(
-    file_id: int,
-    admin: UserModel = Depends(get_current_admin_v2),
-    db: AsyncSession = Depends(get_db)
-):
-    """删除指定的知识库文件"""
-    try:
-        result = await db.execute(select(KnowledgeFileModel).where(KnowledgeFileModel.id == file_id))
-        db_file = result.scalars().first()
-        
-        if not db_file:
-            raise HTTPException(status_code=404, detail="File not found")
-            
-        # 逻辑删除
-        db_file.status = "deleted"
-        
-        # 物理删除文件
-        if os.path.exists(db_file.file_path):
-            os.remove(db_file.file_path)
-            
-        await db.commit()
-        
-        # 提示：删除操作后不自动重刷向量库，因为 Chroma 不支持简单地删除单个文件的 Document
-        # 实际生产中可以通过重构向量库或使用元数据过滤来实现
-        
-        return {"message": "File deleted successfully. Knowledge base will be fully updated on next restart."}
-        
-    except Exception as e:
-        print(f"删除文件失败: {str(e)}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": str(e)}
-        )
+# --- 语义聚类逻辑结束 ---
 
 
 # --- 反馈模块开始 ---
-
 @app.post("/api/feedback")
 async def submit_feedback(
     request: FeedbackRequest,
@@ -2421,22 +1914,32 @@ async def get_hot_questions(
     admin: UserModel = Depends(get_current_admin_v2),
     db: AsyncSession = Depends(get_db)
 ):
-    """管理员：高频问题统计"""
+    """管理员：高频问题统计（从聚类表读取）"""
     result = await db.execute(
-        select(
-            ChatHistoryModel.content,
-            func.count(ChatHistoryModel.id).label("count")
-        ).where(
-            ChatHistoryModel.role == "user",
-            func.length(ChatHistoryModel.content) > 2
-        ).group_by(
-            ChatHistoryModel.content
-        ).order_by(
-            func.count(ChatHistoryModel.id).desc()
-        ).limit(20)
+        select(QuestionClusterModel)
+        .order_by(QuestionClusterModel.count.desc())
+        .limit(20)
     )
+    clusters = result.scalars().all()
     
-    return [{"question": row[0], "count": row[1]} for row in result.all()]
+    # 如果表中没数据，先执行一次同步聚类
+    if not clusters:
+        await update_question_clusters()
+        result = await db.execute(
+            select(QuestionClusterModel)
+            .order_by(QuestionClusterModel.count.desc())
+            .limit(20)
+        )
+        clusters = result.scalars().all()
+    
+    return [
+        {
+            "represent_question": c.represent_question,
+            "count": c.count,
+            "examples": json.loads(c.examples) if c.examples else []
+        }
+        for c in clusters
+    ]
 
 # --- 反馈模块结束 ---
 

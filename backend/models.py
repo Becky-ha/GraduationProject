@@ -48,6 +48,14 @@ class Feedback(Base):
     user = relationship("User")
     message = relationship("ChatHistory", back_populates="feedbacks")
 
+class QuestionClusterModel(Base):
+    __tablename__ = "question_clusters"
+    id = Column(Integer, primary_key=True, index=True)
+    represent_question = Column(String, nullable=False)
+    count = Column(Integer, default=0)
+    examples = Column(String)  # JSON 数组存储示例
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
 class KnowledgeFile(Base):
     __tablename__ = "knowledge_files"
 

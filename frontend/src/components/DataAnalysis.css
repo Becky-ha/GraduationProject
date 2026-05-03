@@ -180,6 +180,18 @@
 .rank-2 { background-color: #f0f9eb; color: #67c23a; border: 1px solid #c2e7b0; }
 .rank-3 { background-color: #ecf5ff; color: #409eff; border: 1px solid #b3d8ff; }
 
+.example-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.example-item {
+  font-size: 0.85rem;
+  color: #909399;
+  font-style: italic;
+}
+
 .sub-loading {
   display: flex;
   justify-content: center;

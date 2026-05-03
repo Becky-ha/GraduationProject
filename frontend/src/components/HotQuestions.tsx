@@ -2,8 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { getHotQuestions } from '../services/chatService';
 
 interface HotQuestionItem {
-  question: string;
+  represent_question: string;
   count: number;
+  examples: string[];
 }
 
 const HotQuestions: React.FC = () => {
@@ -42,7 +43,8 @@ const HotQuestions: React.FC = () => {
           <thead>
             <tr>
               <th style={{ width: '80px' }}>排名</th>
-              <th>问题</th>
+              <th>意图/代表性问题</th>
+              <th>相似提问示例</th>
               <th style={{ width: '120px' }}>出现次数</th>
             </tr>
           </thead>
@@ -54,7 +56,14 @@ const HotQuestions: React.FC = () => {
                     {index + 1}
                   </span>
                 </td>
-                <td title={item.question}>{item.question}</td>
+                <td title={item.represent_question} style={{ fontWeight: 'bold' }}>{item.represent_question}</td>
+                <td>
+                  <div className="example-list">
+                    {item.examples.map((ex, i) => (
+                      <div key={i} className="example-item">• {ex}</div>
+                    ))}
+                  </div>
+                </td>
                 <td className="count-cell">{item.count}</td>
               </tr>
             ))}
