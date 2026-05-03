@@ -15,7 +15,13 @@ if os.path.exists(db_path):
     
     if 'error_message' not in columns:
         cursor.execute('ALTER TABLE knowledge_files ADD COLUMN error_message TEXT')
-        print("Added column 'error_message'")
+        print("Added column 'error_message' to knowledge_files")
+    
+    # 检查并更新 users 表
+    user_columns = [info[1] for info in cursor.execute("PRAGMA table_info(users)").fetchall()]
+    if 'status' not in user_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'active'")
+        print("Added column 'status' to users")
     
     # 更新旧状态
     cursor.execute("UPDATE knowledge_files SET status = 'completed' WHERE status = 'active'")

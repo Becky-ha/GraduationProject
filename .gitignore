@@ -78,4 +78,8 @@ frontend/.env.production.local
 *.swp
 *.swo
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+#知识库文件
+backend/knowledge_base/
+*.pdf

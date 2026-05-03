@@ -57,6 +57,55 @@
 .username {
     font-size: 0.85rem;
     color: #4a5568;
+    cursor: pointer;
+    user-select: none;
+}
+
+/* 下拉菜单样式 */
+.dropdown-container {
+    position: relative;
+}
+
+.dropdown-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 10px;
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    min-width: 120px;
+    z-index: 1000;
+    overflow: hidden;
+    border: 1px solid #eee;
+}
+
+.dropdown-item {
+    display: block;
+    width: 100%;
+    padding: 10px 16px;
+    text-align: left;
+    font-size: 0.85rem;
+    color: #4a5568;
+    text-decoration: none;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.dropdown-item:hover {
+    background: #f7fafc;
+    color: #6c5ce7;
+}
+
+.dropdown-item.logout {
+    border-top: 1px solid #eee;
+    color: #e53e3e;
+}
+
+.dropdown-item.logout:hover {
+    background: #fff5f5;
 }
 
 .logout-button {

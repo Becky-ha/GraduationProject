@@ -7,10 +7,14 @@ import Register from './components/Register';
 import ForgotPassword from './components/ForgotPassword';
 import KnowledgeBaseManager from './components/KnowledgeBaseManager';
 
+import UserProfilePage from './components/UserProfilePage';
+import AdminUserPage from './components/AdminUserPage';
+
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [username, setUsername] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<string | null>(null);
+  const [showUserDropdown, setShowUserDropdown] = useState(false);
 
   useEffect(() => {
     const syncAuthState = () => {
@@ -64,10 +68,22 @@ function App() {
               {userRole === 'admin' && (
                 <Link to="/admin/knowledge" className="nav-link">知识库管理</Link>
               )}
+              {userRole === 'admin' && (
+                <Link to="/admin/users" className="nav-link">用户管理</Link>
+              )}
             </div>
             <div className="user-menu">
-              <span className="username">欢迎, {username}</span>
-              <button onClick={handleLogout} className="logout-button">退出登录</button>
+              <div className="dropdown-container">
+                <span className="username" onClick={() => setShowUserDropdown(!showUserDropdown)}>
+                  欢迎, {username} ▾
+                </span>
+                {showUserDropdown && (
+                  <div className="dropdown-menu">
+                    <Link to="/profile" className="dropdown-item" onClick={() => setShowUserDropdown(false)}>个人中心</Link>
+                    <button onClick={handleLogout} className="dropdown-item logout">退出登录</button>
+                  </div>
+                )}
+              </div>
             </div>
           </header>
         )}
@@ -84,6 +100,14 @@ function App() {
             <Route 
               path="/admin/knowledge" 
               element={isAuthenticated && userRole === 'admin' ? <KnowledgeBaseManager /> : <Navigate to="/" />} 
+            />
+            <Route 
+              path="/admin/users" 
+              element={isAuthenticated && userRole === 'admin' ? <AdminUserPage /> : <Navigate to="/" />} 
+            />
+            <Route 
+              path="/profile" 
+              element={isAuthenticated ? <UserProfilePage /> : <Navigate to="/login" />} 
             />
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />

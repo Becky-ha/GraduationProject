@@ -206,6 +206,18 @@ class Token(BaseModel):
     access_token: str
     token_type: str
 
+class UserStatusUpdate(BaseModel):
+    user_id: int
+    status: str # 'active' or 'disabled'
+
+class UserUpdate(BaseModel):
+    username: Optional[str] = None
+    email: Optional[str] = None
+
+class PasswordChange(BaseModel):
+    old_password: str
+    new_password: str
+
 class ForgotPasswordRequest(BaseModel):
     email: str
 
@@ -319,17 +331,6 @@ async def process_file_background(file_id: int):
             except:
                 pass
 
-# 管理员鉴权依赖
-async def get_current_admin(
-    user_id: int = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(select(UserModel).where(UserModel.id == user_id))
-    user = result.scalars().first()
-    if not user or user.role != "admin":
-        raise HTTPException(status_code=403, detail="Only administrators can perform this action")
-    return user
-
 # 初始化RAG组件
 def initialize_rag(force_rebuild=False):
     # 如果嵌入模型初始化失败，则不初始化RAG
@@ -337,6 +338,110 @@ def initialize_rag(force_rebuild=False):
         print("由于嵌入模型初始化失败，RAG组件无法初始化")
         return None
         
+    try:
+        # 检查是否已存在持久化数据
+        if not force_rebuild and os.path.exists(CHROMA_PERSIST_DIR) and os.listdir(CHROMA_PERSIST_DIR):
+            print(f"检测到已存在的向量库，正在从本地加载: {CHROMA_PERSIST_DIR}")
+            try:
+                vectorstore = Chroma(
+                    persist_directory=CHROMA_PERSIST_DIR,
+                    embedding_function=embeddings,
+                    collection_name="qai_bot_knowledge"
+                )
+                print(f"成功加载本地向量库，包含约 {vectorstore._collection.count()} 个文本块")
+                return vectorstore
+            except Exception as load_err:
+                print(f"加载本地向量库失败，将重新构建: {str(load_err)}")
+
+        print("未检测到本地向量库或强制重构，开始解析文档并构建向量库...")
+        # 尝试找到文件路径
+        possible_file_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "dataset.json"),
+            "./dataset.json",
+        ]
+        
+        dataset_json_path = ""
+        for path in possible_file_paths:
+            if os.path.exists(path):
+                dataset_json_path = path
+                break
+        
+        # 使用 file_parser 加载所有知识库文件
+        documents = load_all_knowledge(KNOWLEDGE_DIR, dataset_json_path)
+
+        if not documents or len(documents) == 0:
+            print("警告: 知识库内容为空，无法初始化 RAG")
+            return None
+            
+        print(f"成功加载文档，共有 {len(documents)} 个文档段落")
+        
+        # 分割文档
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        all_splits = text_splitter.split_documents(documents)
+        
+        if not all_splits or len(all_splits) == 0:
+            print("警告: 文档分割后内容为空")
+            return None
+            
+        print(f"文档分割完成，共有 {len(all_splits)} 个文本块")
+        
+        # 创建向量存储
+        try:
+            safe_splits = []
+            for idx, doc in enumerate(all_splits):
+                metadata = dict(getattr(doc, "metadata", {}) or {})
+                cleaned_metadata = {str(k): str(v) for k, v in metadata.items() if v is not None}
+                safe_splits.append(Document(page_content=doc.page_content, metadata=cleaned_metadata))
+
+            print(f"开始创建向量存储并持久化到: {CHROMA_PERSIST_DIR}")
+            vectorstore = Chroma.from_documents(
+                documents=safe_splits, 
+                embedding=embeddings,
+                persist_directory=CHROMA_PERSIST_DIR,
+                collection_name="qai_bot_knowledge"
+            )
+            print("成功创建并持久化向量存储")
+            return vectorstore
+            
+        except Exception as e:
+            print(f"创建向量存储失败: {str(e)}")
+            return None
+            
+    except Exception as e:
+        print(f"初始化RAG组件失败: {str(e)}")
+        return None
+
+# 获取当前登录用户对象并检查状态
+async def get_active_user(
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(UserModel).where(UserModel.id == user_id))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    if user.status == "disabled":
+        raise HTTPException(status_code=403, detail="Your account has been disabled")
+    return user
+
+# 管理员鉴权依赖（增强版，同时检查状态）
+async def get_current_admin_v2(
+    user: UserModel = Depends(get_active_user)
+):
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only administrators can perform this action")
+    return user
+
+# 用户注册
+@app.post("/api/register")
+async def register(
+    user: UserRegister,
+    db: AsyncSession = Depends(get_db)
+):
+    # 检查用户名是否已存在
+    result = await db.execute(select(UserModel).where(UserModel.username == user.username))
+    if result.scalars().first():
+        raise HTTPException(status_code=400, detail="Username already exists")
     try:
         # 检查是否已存在持久化数据
         if not force_rebuild and os.path.exists(CHROMA_PERSIST_DIR) and os.listdir(CHROMA_PERSIST_DIR):
@@ -733,7 +838,13 @@ async def register(user: UserRegister, db: AsyncSession = Depends(get_db)):
     hashed_password = get_password_hash(user.password)
     # 限制角色只能是 admin 或 student
     final_role = user.role if user.role in ["admin", "student"] else "student"
-    new_user = UserModel(username=user.username, email=user.email, hashed_password=hashed_password, role=final_role)
+    new_user = UserModel(
+        username=user.username, 
+        email=user.email, 
+        hashed_password=hashed_password, 
+        role=final_role,
+        status="active" # 明确设置初始状态
+    )
     db.add(new_user)
     await db.commit()
     return {"message": "User registered successfully"}
@@ -746,6 +857,10 @@ async def login(user: UserLogin, db: AsyncSession = Depends(get_db)):
     
     if not db_user or not verify_password(user.password, db_user.hashed_password):
         raise HTTPException(status_code=401, detail="Incorrect username or password")
+    
+    # 检查用户是否被封禁
+    if db_user.status == "disabled":
+        raise HTTPException(status_code=403, detail="Your account has been disabled")
     
     access_token = create_access_token(data={"sub": str(db_user.id)})
     return {
@@ -809,6 +924,168 @@ async def reset_password(request: ResetPasswordRequest, db: AsyncSession = Depen
     
     await db.commit()
     return {"message": "Password has been reset successfully"}
+
+# --- 用户管理模块开始 ---
+
+# 用户管理接口：获取当前登录用户信息
+@app.get("/api/user/me")
+async def get_my_info(user: UserModel = Depends(get_active_user)):
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "role": user.role,
+        "status": user.status,
+        "created_at": user.created_at.isoformat() if user.created_at else None
+    }
+
+# 管理员接口：获取所有用户列表
+@app.get("/api/admin/users")
+async def get_all_users(
+    admin: UserModel = Depends(get_current_admin_v2),
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(UserModel).order_by(UserModel.id.desc()))
+    users = result.scalars().all()
+    return [{
+        "id": u.id,
+        "username": u.username,
+        "email": u.email,
+        "role": u.role,
+        "status": u.status,
+        "created_at": u.created_at.isoformat() if u.created_at else None
+    } for u in users]
+
+# 管理员接口：查看某个用户详情
+@app.get("/api/admin/users/{user_id}")
+async def get_user_detail(
+    user_id: int,
+    admin: UserModel = Depends(get_current_admin_v2),
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(UserModel).where(UserModel.id == user_id))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "role": user.role,
+        "status": user.status,
+        "created_at": user.created_at.isoformat() if user.created_at else None
+    }
+
+# 管理员接口：封禁/解封用户
+@app.post("/api/admin/ban_user")
+async def update_user_status(
+    request: UserStatusUpdate,
+    admin: UserModel = Depends(get_current_admin_v2),
+    db: AsyncSession = Depends(get_db)
+):
+    if request.status not in ["active", "disabled"]:
+        raise HTTPException(status_code=400, detail="Invalid status. Must be 'active' or 'disabled'")
+    
+    result = await db.execute(select(UserModel).where(UserModel.id == request.user_id))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user.id == admin.id:
+        raise HTTPException(status_code=400, detail="You cannot ban yourself")
+    
+    user.status = request.status
+    await db.commit()
+    return {"message": f"User status updated to {request.status}"}
+
+# 用户管理模块结束 ---
+
+# --- 用户个人信息维护模块开始 ---
+
+# 修改个人基本信息
+@app.put("/api/user/update")
+async def update_user_info(
+    request: UserUpdate,
+    user: UserModel = Depends(get_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    用户修改个人基本信息 (支持修改 username 和 email)
+    """
+    try:
+        updated = False
+        
+        # 1. 处理用户名修改
+        if request.username is not None and request.username != user.username:
+            # 检查用户名是否已被占用
+            result = await db.execute(select(UserModel).where(UserModel.username == request.username))
+            if result.scalars().first():
+                raise HTTPException(status_code=400, detail="Username already exists")
+            user.username = request.username
+            updated = True
+            
+        # 2. 处理邮箱修改
+        if request.email is not None and request.email != user.email:
+            # 检查邮箱是否已被占用
+            result = await db.execute(select(UserModel).where(UserModel.email == request.email))
+            if result.scalars().first():
+                raise HTTPException(status_code=400, detail="Email already registered by another user")
+            user.email = request.email
+            updated = True
+            
+        if not updated:
+            return {"message": "No changes provided"}
+            
+        await db.commit()
+        await db.refresh(user)
+        
+        return {
+            "message": "User information updated successfully",
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "role": user.role,
+                "status": user.status
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        print(f"更新用户信息失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update user information: {str(e)}")
+
+# 修改密码
+@app.post("/api/user/change-password")
+async def change_password(
+    request: PasswordChange,
+    user: UserModel = Depends(get_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    用户在登录状态下修改密码
+    """
+    try:
+        # 1. 校验旧密码
+        if not verify_password(request.old_password, user.hashed_password):
+            raise HTTPException(status_code=400, detail="Incorrect old password")
+        
+        # 2. 加密并保存新密码
+        user.hashed_password = get_password_hash(request.new_password)
+        
+        await db.commit()
+        return {"message": "Password updated successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        print(f"修改密码失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update password: {str(e)}")
+
+# --- 用户个人信息维护模块结束 ---
 
 @app.post("/api/chat")
 async def chat(
@@ -1814,7 +2091,7 @@ async def text2image(
 @app.post("/api/admin/upload-knowledge")
 async def upload_knowledge(
     files: List[UploadFile] = File(...),
-    admin: UserModel = Depends(get_current_admin),
+    admin: UserModel = Depends(get_current_admin_v2),
     db: AsyncSession = Depends(get_db)
 ):
     """管理员上传知识库文件并更新 RAG 组件"""
@@ -1875,7 +2152,7 @@ async def upload_knowledge(
 # 管理员：获取知识库文件列表
 @app.get("/api/admin/knowledge-files")
 async def get_knowledge_files(
-    admin: UserModel = Depends(get_current_admin),
+    admin: UserModel = Depends(get_current_admin_v2),
     db: AsyncSession = Depends(get_db)
 ):
     """获取所有知识库文件"""
@@ -1905,7 +2182,7 @@ async def get_knowledge_files(
 @app.delete("/api/admin/knowledge-files/{file_id}")
 async def delete_knowledge_file(
     file_id: int,
-    admin: UserModel = Depends(get_current_admin),
+    admin: UserModel = Depends(get_current_admin_v2),
     db: AsyncSession = Depends(get_db)
 ):
     """删除指定的知识库文件"""

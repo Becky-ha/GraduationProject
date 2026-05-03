@@ -16,6 +16,7 @@ class User(Base):
     reset_code = Column(String, nullable=True)  # 存储重置验证码
     reset_code_expires = Column(DateTime, nullable=True)  # 验证码过期时间
     created_at = Column(DateTime, default=datetime.utcnow)
+    status = Column(String, default="active")  # active, disabled
 
     conversations = relationship("ChatHistory", back_populates="user")
 

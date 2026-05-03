@@ -1,0 +1,118 @@
+.admin-user-container {
+    padding: 20px;
+    background: white;
+    min-height: calc(100vh - 100px);
+}
+
+.admin-user-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.refresh-btn {
+    padding: 8px 16px;
+    background: #6c5ce7;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.table-wrapper {
+    overflow-x: auto;
+    border-radius: 8px;
+    border: 1px solid #eee;
+}
+
+.user-table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+}
+
+.user-table th, .user-table td {
+    padding: 12px 15px;
+    border-bottom: 1px solid #eee;
+}
+
+.user-table th {
+    background: #f8f9fa;
+    color: #4a5568;
+    font-weight: 600;
+}
+
+.role-badge, .status-badge {
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+}
+
+.role-badge.admin { background: #e0f2fe; color: #0369a1; }
+.role-badge.student { background: #f1f5f9; color: #475569; }
+
+.status-badge.active { background: #dcfce7; color: #166534; }
+.status-badge.disabled { background: #fee2e2; color: #991b1b; }
+
+.action-btns {
+    display: flex;
+    gap: 8px;
+}
+
+.detail-btn, .status-btn {
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: 1px solid #ddd;
+    font-size: 0.8rem;
+    cursor: pointer;
+    background: white;
+}
+
+.status-btn.ban { color: #dc2626; border-color: #fca5a5; }
+.status-btn.unban { color: #16a34a; border-color: #86efac; }
+
+/* Modal */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+
+.modal-content {
+    background: white;
+    padding: 24px;
+    border-radius: 12px;
+    width: 400px;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+}
+
+.detail-grid {
+    margin: 20px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.detail-item {
+    display: flex;
+    justify-content: space-between;
+}
+
+.detail-item label { font-weight: 600; color: #64748b; }
+
+.close-modal {
+    width: 100%;
+    padding: 10px;
+    background: #f1f5f9;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+}
