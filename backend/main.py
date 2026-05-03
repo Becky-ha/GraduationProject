@@ -1492,9 +1492,11 @@ async def get_all_conversations(
         }
         conversation_map[conv_id]["messages"].append(msg_obj)
 
-        if not conversation_map[conv_id]["title"] and row.role == "user":
+        # 始终使用最新的用户消息作为标题
+        if row.role == "user":
             conversation_map[conv_id]["title"] = row.content[:50]
         elif conversation_map[conv_id]["title"] is None:
+            # 如果目前还没有标题（例如第一条消息是助手的欢迎语），则暂用助手内容
             conversation_map[conv_id]["title"] = row.content[:50]
 
         if row.content:
@@ -1518,8 +1520,13 @@ async def get_all_conversations(
         summary = conversation_map[conv_id]
         user_messages = [m for m in messages if m.get("role") == "user" and m.get("content")]
         last_messages = [m for m in messages if m.get("content")]
-        if not summary["title"] and user_messages:
-            summary["title"] = user_messages[0]["content"][:50]
+        # 始终使用最新的用户消息作为标题
+        if user_messages:
+            summary["title"] = user_messages[-1]["content"][:50]
+        elif not summary["title"] and last_messages:
+            # 如果没有用户消息且没有预设标题，则使用最后一条消息
+            summary["title"] = last_messages[-1]["content"][:50]
+
         if last_messages:
             summary["last_message"] = last_messages[-1]["content"][:80]
             ts = last_messages[-1].get("timestamp")
