@@ -34,6 +34,19 @@ class ChatHistory(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="conversations")
+    feedbacks = relationship("Feedback", back_populates="message")
+
+class Feedback(Base):
+    __tablename__ = "feedback"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    message_id = Column(Integer, ForeignKey("chat_history.id"), index=True)
+    feedback_type = Column(String)  # like / dislike
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User")
+    message = relationship("ChatHistory", back_populates="feedbacks")
 
 class KnowledgeFile(Base):
     __tablename__ = "knowledge_files"

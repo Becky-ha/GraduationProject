@@ -9,6 +9,7 @@ import KnowledgeBaseManager from './components/KnowledgeBaseManager';
 
 import UserProfilePage from './components/UserProfilePage';
 import AdminUserPage from './components/AdminUserPage';
+import DataAnalysis from './components/DataAnalysis';
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
@@ -71,6 +72,9 @@ function App() {
               {userRole === 'admin' && (
                 <Link to="/admin/users" className="nav-link">用户管理</Link>
               )}
+              {userRole === 'admin' && (
+                <Link to="/admin/analysis" className="nav-link">数据分析</Link>
+              )}
             </div>
             <div className="user-menu">
               <div className="dropdown-container">
@@ -104,6 +108,10 @@ function App() {
             <Route 
               path="/admin/users" 
               element={isAuthenticated && userRole === 'admin' ? <AdminUserPage /> : <Navigate to="/" />} 
+            />
+            <Route 
+              path="/admin/analysis" 
+              element={isAuthenticated && userRole === 'admin' ? <DataAnalysis /> : <Navigate to="/" />} 
             />
             <Route 
               path="/profile" 

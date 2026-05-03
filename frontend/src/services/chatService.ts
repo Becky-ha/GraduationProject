@@ -402,6 +402,42 @@ export const deleteConversation = async (conversationId: string): Promise<void> 
   });
 };
 
+// 提交反馈
+export const submitFeedback = async (messageId: number, feedbackType: 'like' | 'dislike'): Promise<{ message: string, feedback_type: string | null }> => {
+  const response = await axios.post(`${API_BASE_URL}/feedback`, {
+    message_id: messageId,
+    feedback_type: feedbackType
+  }, {
+    headers: getAuthHeaders()
+  });
+  return response.data;
+};
+
+// 获取反馈统计
+export const getFeedbackStat = async (messageId: number): Promise<{ like_count: number, dislike_count: number, user_feedback: string | null }> => {
+  const response = await axios.get(`${API_BASE_URL}/feedback/stat`, {
+    params: { message_id: messageId },
+    headers: getAuthHeaders()
+  });
+  return response.data;
+};
+
+// 管理员：获取反馈概览
+export const getFeedbackOverview = async (): Promise<any[]> => {
+  const response = await axios.get(`${API_BASE_URL}/admin/feedback/overview`, {
+    headers: getAuthHeaders()
+  });
+  return response.data;
+};
+
+// 管理员：获取高频问题
+export const getHotQuestions = async (): Promise<any[]> => {
+  const response = await axios.get(`${API_BASE_URL}/admin/hot-questions`, {
+    headers: getAuthHeaders()
+  });
+  return response.data;
+};
+
 // 文生图API调用
 export async function callTextToImage(
   prompt: string,

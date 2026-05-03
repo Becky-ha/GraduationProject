@@ -21,8 +21,8 @@ from dashscope import ImageSynthesis
 # 数据库相关导入
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import select, delete
-from models import Base, User as UserModel, ChatHistory as ChatHistoryModel, KnowledgeFile as KnowledgeFileModel
+from sqlalchemy import select, delete, func
+from models import Base, User as UserModel, ChatHistory as ChatHistoryModel, KnowledgeFile as KnowledgeFileModel, Feedback as FeedbackModel
 from auth import get_password_hash, verify_password, create_access_token, get_current_user_id, get_current_user_id_optional
 
 # LangChain导入
@@ -225,6 +225,26 @@ class ResetPasswordRequest(BaseModel):
     email: str
     code: str
     new_password: str
+
+class FeedbackRequest(BaseModel):
+    message_id: int
+    feedback_type: str  # 'like' or 'dislike'
+
+class FeedbackStatResponse(BaseModel):
+    like_count: int
+    dislike_count: int
+    user_feedback: Optional[str] = None
+
+class FeedbackOverviewItem(BaseModel):
+    message_id: int
+    question: str
+    answer: str
+    like_count: int
+    dislike_count: int
+
+class HotQuestionItem(BaseModel):
+    question: str
+    count: int
 
 class StreamingCallbackHandler:
     """用于处理流式回调的处理器"""
@@ -1183,7 +1203,7 @@ async def chat(
             content=response_content,
             source_label=response_meta.get("source_label"),
             matched_docs=json.dumps(response_meta.get("matched_docs")) if response_meta.get("matched_docs") else None,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.utcnow() + timedelta(milliseconds=10)
         )
         db.add(assistant_msg)
         await db.commit()
@@ -1382,7 +1402,7 @@ async def chat_stream(
                             content=full_response,
                             source_label=response_meta.get("source_label"),
                             matched_docs=json.dumps(response_meta.get("matched_docs")) if response_meta.get("matched_docs") else None,
-                            timestamp=datetime.utcnow()
+                            timestamp=datetime.utcnow() + timedelta(milliseconds=10)
                         )
                         db_session.add(user_history)
                         db_session.add(assistant_history)
@@ -1458,7 +1478,7 @@ async def get_all_conversations(
     result = await db.execute(
         select(ChatHistoryModel)
         .where(ChatHistoryModel.user_id == user_id)
-        .order_by(ChatHistoryModel.timestamp.asc())
+        .order_by(ChatHistoryModel.timestamp.asc(), ChatHistoryModel.id.asc())
     )
     history_rows = result.scalars().all()
 
@@ -1481,6 +1501,15 @@ async def get_all_conversations(
             except Exception:
                 matched_docs = None
 
+        # 获取该消息的反馈状态
+        fb_result = await db.execute(
+            select(FeedbackModel.feedback_type).where(
+                FeedbackModel.message_id == row.id,
+                FeedbackModel.user_id == user_id
+            )
+        )
+        user_feedback = fb_result.scalar()
+
         msg_obj = {
             "id": row.id,
             "role": row.role,
@@ -1488,7 +1517,8 @@ async def get_all_conversations(
             "image_url": row.image_url,
             "source_label": row.source_label,
             "matched_docs": matched_docs,
-            "timestamp": row.timestamp.isoformat() if row.timestamp else None
+            "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+            "feedback": user_feedback
         }
         conversation_map[conv_id]["messages"].append(msg_obj)
 
@@ -1543,7 +1573,8 @@ async def get_all_conversations(
                 "image_url": msg.get("image_url"),
                 "source_label": msg.get("source_label"),
                 "matched_docs": msg.get("matched_docs"),
-                "timestamp": msg.get("timestamp")
+                "timestamp": msg.get("timestamp"),
+                "feedback": msg.get("feedback")
             })
 
     conversations = list(conversation_map.values())
@@ -1578,7 +1609,7 @@ async def get_history(
         select(ChatHistoryModel)
         .where(ChatHistoryModel.conversation_id == conversation_id)
         .where(ChatHistoryModel.user_id == user_id)
-        .order_by(ChatHistoryModel.timestamp)
+        .order_by(ChatHistoryModel.timestamp.asc(), ChatHistoryModel.id.asc())
     )
     history = result.scalars().all()
 
@@ -1589,7 +1620,17 @@ async def get_history(
 
     formatted_history = []
     for msg in history:
+        # 获取该消息的反馈状态
+        fb_result = await db.execute(
+            select(FeedbackModel.feedback_type).where(
+                FeedbackModel.message_id == msg.id,
+                FeedbackModel.user_id == user_id
+            )
+        )
+        user_feedback = fb_result.scalar()
+
         formatted_history.append({
+            "id": msg.id,
             "role": msg.role,
             "content": msg.content,
             "timestamp": (
@@ -1599,7 +1640,8 @@ async def get_history(
             ),
             "image_url": msg.image_url,
             "source_label": msg.source_label,
-            "matched_docs": json.loads(msg.matched_docs) if msg.matched_docs else None
+            "matched_docs": json.loads(msg.matched_docs) if msg.matched_docs else None,
+            "feedback": user_feedback
         })
         conversation_store[conversation_id]["messages"].append(formatted_history[-1])
     
@@ -1632,9 +1674,7 @@ async def delete_conversation(
         )
 
 
-# 保存上传的图片
-async def save_uploaded_file(file: UploadFile) -> str:
-    # 生成唯一文件名
+# --- 反馈模块开始 ---
     file_ext = os.path.splitext(file.filename)[1] if file.filename else ".jpg"
     file_name = f"{uuid.uuid4()}{file_ext}"
     file_path = os.path.join(UPLOAD_DIR, file_name)
@@ -2221,9 +2261,189 @@ async def delete_knowledge_file(
             content={"error": str(e)}
         )
 
+
+# --- 反馈模块开始 ---
+
+@app.post("/api/feedback")
+async def submit_feedback(
+    request: FeedbackRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db)
+):
+    """提交点赞/点踩反馈"""
+    print(f"\n>>> [反馈请求] 用户ID: {user_id}, 消息ID: {request.message_id}, 类型: {request.feedback_type}")
+    
+    if request.feedback_type not in ["like", "dislike"]:
+        print(">>> [反馈结果] 失败: 无效的反馈类型")
+        raise HTTPException(status_code=400, detail="Invalid feedback type")
+        
+    # 检查消息是否存在
+    result = await db.execute(select(ChatHistoryModel).where(ChatHistoryModel.id == request.message_id))
+    message = result.scalars().first()
+    if not message:
+        print(f">>> [反馈结果] 失败: 消息 {request.message_id} 不存在")
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    # 检查是否已有反馈
+    result = await db.execute(
+        select(FeedbackModel).where(
+            FeedbackModel.user_id == user_id,
+            FeedbackModel.message_id == request.message_id
+        )
+    )
+    existing_feedback = result.scalars().first()
+
+    if existing_feedback:
+        # 如果已有相同反馈，则取消（Toggle）
+        if existing_feedback.feedback_type == request.feedback_type:
+            print(f">>> [反馈结果] 成功: 用户取消了之前的 {request.feedback_type}")
+            await db.delete(existing_feedback)
+            await db.commit()
+            return {"message": "Feedback removed", "feedback_type": None}
+        else:
+            # 更新反馈类型
+            old_type = existing_feedback.feedback_type
+            existing_feedback.feedback_type = request.feedback_type
+            existing_feedback.created_at = datetime.utcnow()
+            print(f">>> [反馈结果] 成功: 将反馈从 {old_type} 修改为 {request.feedback_type}")
+    else:
+        # 创建新反馈
+        new_feedback = FeedbackModel(
+            user_id=user_id,
+            message_id=request.message_id,
+            feedback_type=request.feedback_type
+        )
+        db.add(new_feedback)
+        print(f">>> [反馈结果] 成功: 新增 {request.feedback_type} 反馈")
+
+    await db.commit()
+    return {"message": "Feedback submitted successfully", "feedback_type": request.feedback_type}
+
+@app.get("/api/feedback/stat", response_model=FeedbackStatResponse)
+async def get_feedback_stat(
+    message_id: int,
+    user_id: Optional[int] = Depends(get_current_user_id_optional),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取单条消息的反馈统计"""
+    # 统计点赞数
+    result = await db.execute(
+        select(func.count()).where(
+            FeedbackModel.message_id == message_id,
+            FeedbackModel.feedback_type == "like"
+        )
+    )
+    like_count = result.scalar() or 0
+
+    # 统计点踩数
+    result = await db.execute(
+        select(func.count()).where(
+            FeedbackModel.message_id == message_id,
+            FeedbackModel.feedback_type == "dislike"
+        )
+    )
+    dislike_count = result.scalar() or 0
+
+    # 获取当前用户的反馈状态
+    user_feedback = None
+    if user_id:
+        result = await db.execute(
+            select(FeedbackModel.feedback_type).where(
+                FeedbackModel.user_id == user_id,
+                FeedbackModel.message_id == message_id
+            )
+        )
+        user_feedback = result.scalar()
+
+    return {
+        "like_count": like_count,
+        "dislike_count": dislike_count,
+        "user_feedback": user_feedback
+    }
+
+@app.get("/api/admin/feedback/overview", response_model=List[FeedbackOverviewItem])
+async def get_feedback_overview(
+    admin: UserModel = Depends(get_current_admin_v2),
+    db: AsyncSession = Depends(get_db)
+):
+    """管理员：获取所有回答的反馈概览"""
+    # 子查询：统计每条消息的点赞数
+    likes_sub = select(
+        FeedbackModel.message_id,
+        func.count(FeedbackModel.id).label("likes")
+    ).where(FeedbackModel.feedback_type == "like").group_by(FeedbackModel.message_id).subquery()
+
+    # 子查询：统计每条消息的点踩数
+    dislikes_sub = select(
+        FeedbackModel.message_id,
+        func.count(FeedbackModel.id).label("dislikes")
+    ).where(FeedbackModel.feedback_type == "dislike").group_by(FeedbackModel.message_id).subquery()
+
+    # 查询助手发出的所有消息及其反馈统计
+    query = select(
+        ChatHistoryModel.id,
+        ChatHistoryModel.content.label("answer"),
+        func.coalesce(likes_sub.c.likes, 0).label("like_count"),
+        func.coalesce(dislikes_sub.c.dislikes, 0).label("dislike_count")
+    ).outerjoin(
+        likes_sub, ChatHistoryModel.id == likes_sub.c.message_id
+    ).outerjoin(
+        dislikes_sub, ChatHistoryModel.id == dislikes_sub.c.message_id
+    ).where(
+        ChatHistoryModel.role == "assistant"
+    ).order_by(ChatHistoryModel.timestamp.desc())
+
+    result = await db.execute(query)
+    items = []
+    for row in result:
+        # 寻找对应的用户提问
+        q_result = await db.execute(
+            select(ChatHistoryModel.content, ChatHistoryModel.conversation_id).where(
+                ChatHistoryModel.id < row.id,
+                ChatHistoryModel.role == "user"
+            ).order_by(ChatHistoryModel.id.desc()).limit(1)
+        )
+        q_row = q_result.first()
+        question = q_row[0] if q_row else "未知提问"
+        
+        items.append({
+            "message_id": row.id,
+            "question": question,
+            "answer": row.answer,
+            "like_count": row.like_count,
+            "dislike_count": row.dislike_count
+        })
+    
+    return items
+
+@app.get("/api/admin/hot-questions", response_model=List[HotQuestionItem])
+async def get_hot_questions(
+    admin: UserModel = Depends(get_current_admin_v2),
+    db: AsyncSession = Depends(get_db)
+):
+    """管理员：高频问题统计"""
+    result = await db.execute(
+        select(
+            ChatHistoryModel.content,
+            func.count(ChatHistoryModel.id).label("count")
+        ).where(
+            ChatHistoryModel.role == "user",
+            func.length(ChatHistoryModel.content) > 2
+        ).group_by(
+            ChatHistoryModel.content
+        ).order_by(
+            func.count(ChatHistoryModel.id).desc()
+        ).limit(20)
+    )
+    
+    return [{"question": row[0], "count": row[1]} for row in result.all()]
+
+# --- 反馈模块结束 ---
+
+
 if __name__ == "__main__":
     import uvicorn
     # 强制使用 127.0.0.1 和 8088 端口，避开所有可能的冲突
     print(">>> 正在启动 AI 课程助教后端 <<<")
     print(">>> 请确保前端请求地址为: http://127.0.0.1:8088 <<<")
-    uvicorn.run("main:app", host="127.0.0.1", port=8088, reload=True) 
+    uvicorn.run("main:app", host="127.0.0.1", port=8088, reload=True)

@@ -6,7 +6,8 @@ import {
   callTextToImage,
   getConversationList,
   ConversationSummary,
-  deleteConversation
+  deleteConversation,
+  submitFeedback
 } from '../services/chatService'
 import ReactMarkdown from 'react-markdown'
 import rehypeSanitize from 'rehype-sanitize'
@@ -18,10 +19,12 @@ interface ChatInterfaceProps {
 }
 
 interface ChatMessage extends Message {
+  id?: number
   user_question?: string
   source_label?: string
   matched_docs?: Array<{ filename: string; content_preview: string }>
   isStreaming?: boolean
+  feedback?: 'like' | 'dislike' | null
 }
 
 const ChatInterface: React.FC<ChatInterfaceProps> = ({ onLogout }) => {
@@ -113,11 +116,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onLogout }) => {
         // 转换历史消息为我们应用的格式
         const formattedMessages: ChatMessage[] = history.history.map(
           (msg: any) => ({
+            id: msg.id,
             role: msg.role,
             content: msg.content,
             timestamp: msg.timestamp,
             image_url: msg.image_url,
-            response_meta: msg.response_meta
+            source_label: msg.source_label,
+            matched_docs: msg.matched_docs,
+            feedback: msg.feedback
           })
         )
 
@@ -532,11 +538,29 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onLogout }) => {
   }
 
 
-  const handleFeedback = (index: number, type: 'like' | 'dislike') => {
-    setMessageFeedback((prev) => ({
-      ...prev,
-      [index]: prev[index] === type ? null : type
-    }))
+  const handleFeedback = async (index: number, type: 'like' | 'dislike') => {
+    const message = messages[index]
+    if (!message || !message.id) {
+      console.warn('无法为没有 ID 的消息提交反馈')
+      return
+    }
+
+    try {
+      const response = await submitFeedback(message.id, type)
+      
+      // 更新本地状态
+      setMessages(prev => {
+        const updated = [...prev]
+        updated[index] = {
+          ...updated[index],
+          feedback: response.feedback_type as 'like' | 'dislike' | null
+        }
+        return updated
+      })
+    } catch (error) {
+      console.error('提交反馈失败:', error)
+      alert('提交反馈失败，请稍后重试')
+    }
   }
 
   const handleCopyMessage = async (content: string, index: number) => {
@@ -832,7 +856,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onLogout }) => {
                           {message.role === 'assistant' && (
                             <>
                               <button
-                                className={`message-action-btn ${messageFeedback[index] === 'like' ? 'active' : ''}`}
+                                className={`message-action-btn ${message.feedback === 'like' ? 'active' : ''}`}
                                 onClick={() => handleFeedback(index, 'like')}
                                 title="点赞"
                                 type="button"
@@ -842,7 +866,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onLogout }) => {
                                 </svg>
                               </button>
                               <button
-                                className={`message-action-btn ${messageFeedback[index] === 'dislike' ? 'active' : ''}`}
+                                className={`message-action-btn ${message.feedback === 'dislike' ? 'active' : ''}`}
                                 onClick={() => handleFeedback(index, 'dislike')}
                                 title="不赞成"
                                 type="button"
