@@ -1787,71 +1787,122 @@ def preprocess_text(text: str) -> str:
     return text.lower().strip()
 
 async def update_question_clusters():
-    """离线任务：更新问题聚类结果"""
-    print("\n>>> [语义聚类] 开始执行增量聚类任务...")
+    """离线任务：更新问题聚类结果 (语义聚类版本)"""
+    print("\n>>> [语义聚类] 开始执行语义聚类任务...")
+    
+    # 检查嵌入模型
+    if embeddings is None:
+        print(">>> [语义聚类] 嵌入模型不可用，跳过任务")
+        return
+
     async with async_session() as db:
         try:
-            # 1. 获取所有用户问题
+            # 1. 获取所有用户问题 (长度大于2)
             result = await db.execute(
                 select(ChatHistoryModel.content)
                 .where(ChatHistoryModel.role == "user", func.length(ChatHistoryModel.content) > 2)
             )
-            questions = [row[0] for row in result.all()]
-            if not questions:
+            raw_questions = [row[0] for row in result.all()]
+            
+            if not raw_questions:
                 print(">>> [语义聚类] 无有效问题数据，跳过任务")
                 return
 
-            clusters = [] # 存储结构: {"represent": str, "count": int, "examples": set}
-            processed_map = {} # processed_text -> cluster_index
+            # 2. 向量化所有问题 (由于 embeddings.embed_documents 可能是同步阻塞的，在 executor 中运行)
+            print(f">>> [语义聚类] 正在对 {len(raw_questions)} 条问题进行向量化...")
+            loop = asyncio.get_event_loop()
+            question_vectors = await loop.run_in_executor(None, embeddings.embed_documents, raw_questions)
             
-            for q in questions:
-                p_q = preprocess_text(q)
-                if not p_q: continue
+            # 3. 阈值聚类算法
+            SIMILARITY_THRESHOLD = 0.85
+            clusters = [] # List of dict: {"center_vector": np.array, "questions": [str], "count": int}
+
+            for q_text, q_vec in zip(raw_questions, question_vectors):
+                q_vec = np.array(q_vec)
+                matched_idx = -1
+                max_sim = -1
                 
-                # 精确匹配（预处理后）
-                if p_q in processed_map:
-                    idx = processed_map[p_q]
-                    clusters[idx]["count"] += 1
-                    clusters[idx]["examples"].add(q)
-                else:
-                    # 模糊匹配：如果预处理后的字符串包含或非常接近，则归类
-                    matched = False
-                    # 仅对已有的 Top 类别进行检查以保证性能
-                    for cluster in clusters:
-                        p_rep = preprocess_text(cluster["represent"])
-                        if p_q in p_rep or p_rep in p_q:
-                            cluster["count"] += 1
-                            cluster["examples"].add(q)
-                            processed_map[p_q] = clusters.index(cluster)
-                            matched = True
-                            break
+                # 寻找最相似的已有类簇中心
+                for idx, cluster in enumerate(clusters):
+                    center_vec = cluster["center_vector"]
+                    # 计算余弦相似度
+                    dot_product = np.dot(q_vec, center_vec)
+                    norm_a = np.linalg.norm(q_vec)
+                    norm_b = np.linalg.norm(center_vec)
+                    similarity = dot_product / (norm_a * norm_b) if (norm_a > 0 and norm_b > 0) else 0
                     
-                    if not matched:
-                        processed_map[p_q] = len(clusters)
-                        clusters.append({
-                            "represent": q,
-                            "count": 1,
-                            "examples": {q}
-                        })
+                    if similarity > SIMILARITY_THRESHOLD and similarity > max_sim:
+                        max_sim = similarity
+                        matched_idx = idx
+                
+                if matched_idx != -1:
+                    # 归入已有类簇，更新中心向量 (简单平均)
+                    c = clusters[matched_idx]
+                    prev_count = c["count"]
+                    c["questions"].append(q_text)
+                    c["count"] += 1
+                    # 更新中心向量: (old_center * n + new_vec) / (n+1)
+                    c["center_vector"] = (c["center_vector"] * prev_count + q_vec) / c["count"]
+                else:
+                    # 创建新类簇
+                    clusters.append({
+                        "center_vector": q_vec,
+                        "questions": [q_text],
+                        "count": 1
+                    })
 
-            # 排序并取 Top 30
-            clusters.sort(key=lambda x: x["count"], reverse=True)
-            top_clusters = clusters[:30]
+            # 4. 代表性问题优化与排序
+            print(f">>> [语义聚类] 聚类完成，共识别出 {len(clusters)} 个类簇")
+            
+            cluster_results = []
+            for idx, c in enumerate(clusters):
+                # 寻找该类簇内出现频率最高的问题作为代表
+                # 先统计频次
+                freq_map = {}
+                for q in c["questions"]:
+                    freq_map[q] = freq_map.get(q, 0) + 1
+                
+                # 按频次排序
+                sorted_qs = sorted(freq_map.items(), key=lambda x: x[1], reverse=True)
+                represent = sorted_qs[0][0]
+                
+                # 获取示例 (取前 5 个不重复的问题)
+                unique_examples = []
+                seen = set()
+                for q in c["questions"]:
+                    if q not in seen:
+                        unique_examples.append(q)
+                        seen.add(q)
+                    if len(unique_examples) >= 5:
+                        break
 
-            # 清理旧数据并写入新数据
+                cluster_results.append({
+                    "cluster_id": idx + 1,
+                    "represent_question": represent,
+                    "count": c["count"],
+                    "examples": unique_examples
+                })
+
+            # 按出现次数降序，取 Top 20
+            cluster_results.sort(key=lambda x: x["count"], reverse=True)
+            top_results = cluster_results[:20]
+
+            # 5. 清理旧数据并写入新数据
             await db.execute(delete(QuestionClusterModel))
-            for c in top_clusters:
-                new_cluster = QuestionClusterModel(
-                    represent_question=c["represent"],
-                    count=c["count"],
-                    examples=json.dumps(list(c["examples"])[:5], ensure_ascii=False)
+            for res in top_results:
+                new_cluster_row = QuestionClusterModel(
+                    represent_question=res["represent_question"],
+                    count=res["count"],
+                    examples=json.dumps(res["examples"], ensure_ascii=False)
                 )
-                db.add(new_cluster)
+                db.add(new_cluster_row)
             
             await db.commit()
-            print(f">>> [语义聚类] 任务完成，成功识别 {len(top_clusters)} 个核心意图类别")
+            print(f">>> [语义聚类] 任务圆满完成，已更新 Top {len(top_results)} 核心意图")
+            
         except Exception as e:
-            print(f">>> [语义聚类] 聚类任务失败: {str(e)}")
+            await db.rollback()
+            print(f">>> [语义聚类] 任务异常失败: {str(e)}")
             import traceback
             traceback.print_exc()
 
