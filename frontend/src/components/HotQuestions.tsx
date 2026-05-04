@@ -29,9 +29,6 @@ const HotQuestions: React.FC = () => {
     }
   };
 
-  if (isLoading) return <div className="sub-loading">加载中...</div>;
-  if (error) return <div className="sub-error">{error}</div>;
-
   return (
     <div className="analysis-sub-content">
       <div className="section-header">
@@ -39,36 +36,42 @@ const HotQuestions: React.FC = () => {
         <button className="refresh-mini-btn" onClick={fetchData}>刷新</button>
       </div>
       <div className="table-wrapper">
-        <table className="analysis-table">
-          <thead>
-            <tr>
-              <th style={{ width: '80px' }}>排名</th>
-              <th>意图/代表性问题</th>
-              <th>相似提问示例</th>
-              <th style={{ width: '120px' }}>出现次数</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.map((item, index) => (
-              <tr key={index}>
-                <td className="rank-cell">
-                  <span className={`rank-badge rank-${index + 1}`}>
-                    {index + 1}
-                  </span>
-                </td>
-                <td title={item.represent_question} style={{ fontWeight: 'bold' }}>{item.represent_question}</td>
-                <td>
-                  <div className="example-list">
-                    {item.examples.map((ex, i) => (
-                      <div key={i} className="example-item">• {ex}</div>
-                    ))}
-                  </div>
-                </td>
-                <td className="count-cell">{item.count}</td>
+        {isLoading ? (
+          <div className="sub-loading">加载中...</div>
+        ) : error ? (
+          <div className="sub-error">{error}</div>
+        ) : (
+          <table className="analysis-table">
+            <thead>
+              <tr>
+                <th style={{ width: '80px' }}>排名</th>
+                <th>意图/代表性问题</th>
+                <th>相似提问示例</th>
+                <th style={{ width: '120px' }}>出现次数</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {data.map((item, index) => (
+                <tr key={index}>
+                  <td className="rank-cell">
+                    <span className={`rank-badge rank-${index + 1}`}>
+                      {index + 1}
+                    </span>
+                  </td>
+                  <td title={item.represent_question} style={{ fontWeight: 'bold' }}>{item.represent_question}</td>
+                  <td>
+                    <div className="example-list">
+                      {item.examples.map((ex, i) => (
+                        <div key={i} className="example-item">• {ex}</div>
+                      ))}
+                    </div>
+                  </td>
+                  <td className="count-cell">{item.count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );

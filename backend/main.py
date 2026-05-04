@@ -1,8 +1,9 @@
-from fastapi import FastAPI, Request, Depends, status, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, Depends, status, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
 import os
 import json
 import asyncio
@@ -247,6 +248,20 @@ class HotQuestionItem(BaseModel):
     represent_question: str
     count: int
     examples: List[str]
+
+class KnowledgeFileResponse(BaseModel):
+    id: int
+    filename: str
+    file_type: str
+    file_size: Optional[int] = 0
+    status: str
+    progress: int
+    error_message: Optional[str] = None
+    created_at: datetime
+
+    model_config = {
+        "from_attributes": True
+    }
 
 class StreamingCallbackHandler:
     """用于处理流式回调的处理器"""
@@ -1671,6 +1686,93 @@ async def delete_conversation(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete conversation: {str(e)}"
         )
+
+
+# --- 知识库管理模块开始 ---
+
+@app.get("/api/admin/knowledge-files", response_model=List[KnowledgeFileResponse])
+async def get_knowledge_files(
+    admin: UserModel = Depends(get_current_admin_v2),
+    db: AsyncSession = Depends(get_db)
+):
+    """管理员：获取所有知识库文件"""
+    result = await db.execute(select(KnowledgeFileModel).order_by(KnowledgeFileModel.created_at.desc()))
+    return result.scalars().all()
+
+@app.post("/api/admin/upload-knowledge")
+async def upload_knowledge(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    admin: UserModel = Depends(get_current_admin_v2),
+    db: AsyncSession = Depends(get_db)
+):
+    """管理员：上传知识库文件并启动后台解析"""
+    uploaded_files = []
+    
+    for file in files:
+        # 1. 保存物理文件
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        unique_filename = f"{uuid.uuid4()}_{file.filename}"
+        file_path = os.path.join(KNOWLEDGE_DIR, unique_filename)
+        
+        try:
+            content = await file.read()
+            async with aiofiles.open(file_path, 'wb') as f:
+                await f.write(content)
+            
+            # 2. 写入数据库记录
+            new_file = KnowledgeFileModel(
+                filename=file.filename,
+                file_path=file_path,
+                file_type=file_ext,
+                size=len(content),
+                status="pending",
+                progress=0
+            )
+            db.add(new_file)
+            await db.commit()
+            await db.refresh(new_file)
+            
+            # 3. 启动后台任务解析
+            background_tasks.add_task(process_file_background, new_file.id)
+            uploaded_files.append({"filename": file.filename, "file_id": new_file.id})
+            
+        except Exception as e:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            print(f"上传文件 {file.filename} 失败: {str(e)}")
+            continue
+            
+    return {"message": f"Successfully uploaded {len(uploaded_files)} files", "files": uploaded_files}
+
+@app.delete("/api/admin/knowledge-files/{file_id}")
+async def delete_knowledge_file(
+    file_id: int,
+    admin: UserModel = Depends(get_current_admin_v2),
+    db: AsyncSession = Depends(get_db)
+):
+    """管理员：删除知识库文件及其向量库条目"""
+    # 1. 获取文件记录
+    result = await db.execute(select(KnowledgeFileModel).where(KnowledgeFileModel.id == file_id))
+    db_file = result.scalars().first()
+    if not db_file:
+        raise HTTPException(status_code=404, detail="File not found")
+        
+    try:
+        # 2. 删除物理文件
+        if os.path.exists(db_file.file_path):
+            os.remove(db_file.file_path)
+            
+        # 4. 删除数据库记录
+        await db.delete(db_file)
+        await db.commit()
+        
+        return {"message": "File deleted successfully"}
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
+
+# --- 知识库管理模块结束 ---
 
 
 # --- 语义聚类逻辑开始 ---
