@@ -909,7 +909,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onLogout }) => {
 
                         {message.role === 'assistant' && message.source_label && !message.isStreaming && (
                           <div className="source-label-inline">
-                            来源：{message.source_label === '知识库' ? '知识库' : '大模型'}
+                            来源：{message.source_label === '知识库' ? 'QAI专属教学资源库' : '大模型'}
                           </div>
                         )}
                       </div>

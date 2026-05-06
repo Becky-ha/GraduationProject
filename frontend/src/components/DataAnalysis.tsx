@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import FeedbackOverview from './FeedbackOverview';
 import HotQuestions from './HotQuestions';
+import KnowledgeAnalysis from './KnowledgeAnalysis';
 import './DataAnalysis.css';
 
-type AnalysisTab = 'feedback' | 'hot-questions';
+type AnalysisTab = 'feedback' | 'hot-questions' | 'knowledge-analysis';
 
 const DataAnalysis: React.FC = () => {
   const [activeTab, setActiveTab] = useState<AnalysisTab>('feedback');
@@ -19,13 +20,19 @@ const DataAnalysis: React.FC = () => {
             className={`nav-item ${activeTab === 'feedback' ? 'active' : ''}`}
             onClick={() => setActiveTab('feedback')}
           >
-            <span className="icon">�</span> 反馈统计
+            <span className="icon">📊</span> 反馈统计
           </button>
           <button 
             className={`nav-item ${activeTab === 'hot-questions' ? 'active' : ''}`}
             onClick={() => setActiveTab('hot-questions')}
           >
-            <span className="icon">🔥</span> 高频问题
+            <span className="icon">🔥</span> 问题统计
+          </button>
+          <button 
+            className={`nav-item ${activeTab === 'knowledge-analysis' ? 'active' : ''}`}
+            onClick={() => setActiveTab('knowledge-analysis')}
+          >
+            <span className="icon">📚</span> 知识库分析
           </button>
         </nav>
       </aside>
@@ -34,6 +41,7 @@ const DataAnalysis: React.FC = () => {
         <div className="tab-content-wrapper">
           {activeTab === 'feedback' && <FeedbackOverview />}
           {activeTab === 'hot-questions' && <HotQuestions />}
+          {activeTab === 'knowledge-analysis' && <KnowledgeAnalysis />}
         </div>
       </main>
     </div>

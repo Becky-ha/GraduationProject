@@ -56,7 +56,7 @@ const FeedbackOverview: React.FC = () => {
   return (
     <div className="analysis-sub-content">
       <div className="section-header">
-        <h2>反馈统计</h2>
+        <div />
         <button className="refresh-mini-btn" onClick={fetchData}>刷新</button>
       </div>
       <div className="table-wrapper">

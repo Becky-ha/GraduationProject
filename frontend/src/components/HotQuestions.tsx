@@ -44,7 +44,7 @@ const HotQuestions: React.FC = () => {
   return (
     <div className="analysis-sub-content">
       <div className="section-header">
-        <h2>高频问题语义分析</h2>
+        <div />
         <button className="refresh-mini-btn" onClick={fetchData}>同步最新数据</button>
       </div>
       <div className="table-wrapper">
@@ -83,9 +83,6 @@ const HotQuestions: React.FC = () => {
                         {isExpanded ? '收起' : `展开更多 (${item.examples.length - 3})`}
                       </button>
                     )}
-                    <button className="btn-add-kb" title="将此意图下的典型问答加入知识库">
-                      ＋ 加入知识库
-                    </button>
                   </div>
                 </div>
               );

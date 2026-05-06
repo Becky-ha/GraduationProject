@@ -235,7 +235,8 @@ const KnowledgeBaseManager: React.FC = () => {
   return (
     <div className="kb-manager-page">
       <div className="kb-header">
-        <h1>知识库中心</h1>
+        <h1>专属教学资源库</h1>
+        <p className="kb-subtitle">本库资料源自课程官方课件、指定教材及教学教案，确保权威可靠</p>
         <div className="header-actions">
           <input
             type="file"
