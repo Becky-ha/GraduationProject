@@ -16,14 +16,40 @@ const HotQuestions: React.FC = () => {
 
   useEffect(() => {
     fetchData();
+    
+    // 监听来自其他组件的刷新请求
+    const handleRefresh = () => fetchData();
+    window.addEventListener('refresh-analysis-data', handleRefresh);
+    return () => window.removeEventListener('refresh-analysis-data', handleRefresh);
   }, []);
 
-  const fetchData = async () => {
+  const fetchData = async (force: boolean = false) => {
     try {
       setIsLoading(true);
-      const result = await getHotQuestions();
+      const token = localStorage.getItem('token');
+      // 如果 force 为 true，通知后端重新聚类
+      const url = force 
+        ? 'http://127.0.0.1:8088/api/admin/hot-questions?force_update=true' 
+        : 'http://127.0.0.1:8088/api/admin/hot-questions';
+        
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      
+      if (response.status === 202) {
+        // 202 表示任务已启动，等待一会儿再请求数据
+        setTimeout(() => fetchData(false), 2000);
+        return;
+      }
+      
+      const result = await response.json();
       setData(result);
       setError(null);
+      
+      // 如果是手动触发的强制刷新，通知其他组件也更新
+      if (force) {
+        window.dispatchEvent(new CustomEvent('refresh-analysis-data'));
+      }
     } catch (err) {
       setError('加载高频问题分类失败');
     } finally {
@@ -45,7 +71,7 @@ const HotQuestions: React.FC = () => {
     <div className="analysis-sub-content">
       <div className="section-header">
         <div />
-        <button className="refresh-mini-btn" onClick={fetchData}>同步最新数据</button>
+        <button className="refresh-mini-btn" onClick={() => fetchData(true)}>同步最新数据</button>
       </div>
       <div className="table-wrapper">
         {isLoading ? (

@@ -24,9 +24,14 @@ const KnowledgeAnalysis: React.FC = () => {
 
   useEffect(() => {
     fetchAnalysis();
+
+    // 监听来自其他组件的刷新请求
+    const handleRefresh = () => fetchAnalysis();
+    window.addEventListener('refresh-analysis-data', handleRefresh);
+    return () => window.removeEventListener('refresh-analysis-data', handleRefresh);
   }, []);
 
-  const fetchAnalysis = async () => {
+  const fetchAnalysis = async (isManual: boolean = false) => {
     try {
       setLoading(true);
       const token = localStorage.getItem('token');
@@ -35,6 +40,11 @@ const KnowledgeAnalysis: React.FC = () => {
       });
       setData(response.data);
       setError(null);
+
+      // 如果是手动触发的重新分析，通知其他组件也更新
+      if (isManual) {
+        window.dispatchEvent(new CustomEvent('refresh-analysis-data'));
+      }
     } catch (err) {
       setError('获取知识库分析数据失败');
       console.error(err);
@@ -51,7 +61,7 @@ const KnowledgeAnalysis: React.FC = () => {
     <div className="analysis-sub-content">
       <div className="section-header">
         <div />
-        <button className="refresh-mini-btn" onClick={fetchAnalysis}>重新分析</button>
+        <button className="refresh-mini-btn" onClick={() => fetchAnalysis(true)}>重新分析</button>
       </div>
 
       <div className="analysis-overview-cards">

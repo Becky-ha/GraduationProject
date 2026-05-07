@@ -1366,7 +1366,7 @@ async def upload_knowledge(
                 filename=file.filename,
                 file_path=file_path,
                 file_type=file_ext,
-                size=len(content),
+                file_size=len(content),
                 status="pending",
                 progress=0
             )
@@ -1438,8 +1438,8 @@ def preprocess_text(text: str) -> str:
     return text.lower().strip()
 
 async def update_question_clusters():
-    """离线任务：更新问题聚类结果 (语义聚类版本)"""
-    print("\n>>> [语义聚类] 开始执行语义聚类任务...")
+    """离线任务：更新问题聚类结果 (改进的语义聚类 + LLM 标题提炼)"""
+    print("\n>>> [语义聚类] 开始执行增强版语义聚类任务...")
     
     # 检查嵌入模型
     if embeddings is None:
@@ -1459,13 +1459,13 @@ async def update_question_clusters():
                 print(">>> [语义聚类] 无有效问题数据，跳过任务")
                 return
 
-            # 2. 向量化所有问题 (由于 embeddings.embed_documents 可能是同步阻塞的，在 executor 中运行)
+            # 2. 向量化所有问题
             print(f">>> [语义聚类] 正在对 {len(raw_questions)} 条问题进行向量化...")
             loop = asyncio.get_event_loop()
             question_vectors = await loop.run_in_executor(None, embeddings.embed_documents, raw_questions)
             
-            # 3. 阈值聚类算法
-            SIMILARITY_THRESHOLD = 0.85
+            # 3. 改进的聚类算法 (固定中心法防止漂移)
+            SIMILARITY_THRESHOLD = 0.92  # 提高阈值，确保更精准的归类
             clusters = [] # List of dict: {"center_vector": np.array, "questions": [str], "count": int}
 
             for q_text, q_vec in zip(raw_questions, question_vectors):
@@ -1487,60 +1487,62 @@ async def update_question_clusters():
                         matched_idx = idx
                 
                 if matched_idx != -1:
-                    # 归入已有类簇，更新中心向量 (简单平均)
-                    c = clusters[matched_idx]
-                    prev_count = c["count"]
-                    c["questions"].append(q_text)
-                    c["count"] += 1
-                    # 更新中心向量: (old_center * n + new_vec) / (n+1)
-                    c["center_vector"] = (c["center_vector"] * prev_count + q_vec) / c["count"]
+                    # 归入已有类簇，但不更新中心向量，防止类簇漂移（核心成员决定类簇）
+                    clusters[matched_idx]["questions"].append(q_text)
+                    clusters[matched_idx]["count"] += 1
                 else:
-                    # 创建新类簇
+                    # 创建新类簇，将第一个加入的成员作为永久中心
                     clusters.append({
                         "center_vector": q_vec,
                         "questions": [q_text],
                         "count": 1
                     })
 
-            # 4. 代表性问题优化与排序
-            print(f">>> [语义聚类] 聚类完成，共识别出 {len(clusters)} 个类簇")
+            # 4. LLM 标题提炼与结果整合
+            print(f">>> [语义聚类] 聚类完成，识别出 {len(clusters)} 个初步类簇，开始提炼核心意图...")
+            
+            # 按规模排序，优先处理规模大的类簇
+            clusters.sort(key=lambda x: x["count"], reverse=True)
+            top_clusters = clusters[:20]  # 取前 20 个
             
             cluster_results = []
-            for idx, c in enumerate(clusters):
-                # 寻找该类簇内出现频率最高的问题作为代表
-                # 先统计频次
-                freq_map = {}
-                for q in c["questions"]:
-                    freq_map[q] = freq_map.get(q, 0) + 1
+            model = ChatTongyi(model_name="qwen-turbo")
+            
+            for idx, c in enumerate(top_clusters):
+                # 提取唯一示例
+                unique_examples = list(set(c["questions"]))
+                sample_for_llm = unique_examples[:8]  # 取前 8 条给 LLM 参考
                 
-                # 按频次排序
-                sorted_qs = sorted(freq_map.items(), key=lambda x: x[1], reverse=True)
-                represent = sorted_qs[0][0]
+                # 利用 LLM 总结核心意图
+                prompt = f"""以下是用户的一组相似提问示例，请你总结出它们共同的核心意图作为标题。
+要求：
+1. 语言极其简练，通常在 5-10 个字之间。
+2. 能够准确覆盖示例的主旨。
+3. 直接返回标题，不要有任何解释。
+
+提问示例：
+{chr(10).join(['- ' + q for q in sample_for_llm])}
+
+核心意图标题："""
                 
-                # 获取示例 (取前 5 个不重复的问题)
-                unique_examples = []
-                seen = set()
-                for q in c["questions"]:
-                    if q not in seen:
-                        unique_examples.append(q)
-                        seen.add(q)
-                    if len(unique_examples) >= 5:
-                        break
+                try:
+                    represent = (await model.ainvoke(prompt)).content.strip()
+                    # 去除引号或句号
+                    represent = represent.replace('"', '').replace('“', '').replace('”', '').replace('。', '')
+                    print(f"   - 类簇 {idx+1}: '{represent}' (成员数: {c['count']})")
+                except Exception as e:
+                    print(f"   - 类簇 {idx+1}: LLM 提炼失败，使用首条提问。错误: {str(e)}")
+                    represent = c["questions"][0][:30]
 
                 cluster_results.append({
-                    "cluster_id": idx + 1,
                     "represent_question": represent,
                     "count": c["count"],
-                    "examples": unique_examples
+                    "examples": unique_examples[:10]  # 保留 10 个示例供展示
                 })
-
-            # 按出现次数降序，取 Top 20
-            cluster_results.sort(key=lambda x: x["count"], reverse=True)
-            top_results = cluster_results[:20]
 
             # 5. 清理旧数据并写入新数据
             await db.execute(delete(QuestionClusterModel))
-            for res in top_results:
+            for res in cluster_results:
                 new_cluster_row = QuestionClusterModel(
                     represent_question=res["represent_question"],
                     count=res["count"],
@@ -1549,7 +1551,7 @@ async def update_question_clusters():
                 db.add(new_cluster_row)
             
             await db.commit()
-            print(f">>> [语义聚类] 任务圆满完成，已更新 Top {len(top_results)} 核心意图")
+            print(f">>> [语义聚类] 增强版任务完成，已更新 {len(cluster_results)} 个意图分类。")
             
         except Exception as e:
             await db.rollback()
@@ -1716,10 +1718,16 @@ async def get_feedback_overview(
 @app.get("/api/admin/hot-questions", response_model=List[HotQuestionItem])
 async def get_hot_questions(
     background_tasks: BackgroundTasks,
+    force_update: bool = False,
     admin: UserModel = Depends(get_current_admin_v2),
     db: AsyncSession = Depends(get_db)
 ):
     """管理员：高频问题统计（从聚类表读取）"""
+    # 如果强制更新，直接启动后台任务
+    if force_update:
+        background_tasks.add_task(update_question_clusters)
+        return JSONResponse(status_code=202, content={"message": "Clustering task started"})
+
     result = await db.execute(
         select(QuestionClusterModel)
         .order_by(QuestionClusterModel.count.desc())
@@ -1786,11 +1794,18 @@ async def get_knowledge_analysis(
         
         if vectorstore:
             try:
-                # 使用相似度搜索检查关键词覆盖情况
-                search_results = vectorstore.similarity_search_with_score(kw, k=5)
-                # Chroma 的 score 通常是 L2 距离，越小越相似
-                valid_results = [res for res, score in search_results if score < 1.0]
-                source_count = len(valid_results)
+                # 增强检索：使用组合词提高匹配成功率（模拟真实对话提问）
+                search_queries = [kw, f"什么是{kw}", f"{kw}的概念和原理"]
+                best_valid_results = []
+                
+                for query in search_queries:
+                    search_results = vectorstore.similarity_search_with_score(query, k=3)
+                    # 将判定阈值从 1.0 放宽至 1.25，与对话检索逻辑保持一致
+                    valid_results = [res for res, score in search_results if score < 1.25]
+                    if len(valid_results) > len(best_valid_results):
+                        best_valid_results = valid_results
+                
+                source_count = len(best_valid_results)
                 is_covered = source_count > 0
             except:
                 pass
