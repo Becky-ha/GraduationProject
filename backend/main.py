@@ -693,24 +693,22 @@ async def smart_answer(question, model, chat_history=None):
         source_docs = []
         if vectorstore:
             try:
-                # 使用 vectorstore 进行带分值的相似度搜索
-                # search_type="similarity_score_threshold" 在 Chroma 中可能不直接支持 invoke
-                # 故使用向量库原生的相似度搜索方法
-                # k=3，设置一个相似度阈值 (0-1)，分值越接近 1 越相似
-                # 注意：Chroma 的分值通常是距离值（L2 距离），越小越相似，通常 < 1.0 是较好的匹配
-                search_results = vectorstore.similarity_search_with_relevance_scores(question, k=3)
+                # 使用 similarity_search_with_score，它返回的是原始 L2 距离
+                # 注意：距离越小越相似。对于 DashScope v3，通常距离 < 1.0 都是非常相关的
+                search_results = vectorstore.similarity_search_with_score(question, k=3)
                 
-                # 过滤掉低于相关度阈值的文档
-                # 提高阈值到 0.65 左右通常能过滤掉大部分不相关的“噪音”
-                threshold = 0.65
-                source_docs = [doc for doc, score in search_results if score >= threshold]
+                # 过滤策略：
+                # 1. 距离小于 0.8 的视为高度相关
+                # 2. 或者直接取最相似的前 2 条（只要它们不是完全不相关）
+                source_docs = []
+                for doc, score in search_results:
+                    print(f"🔍 检索分值 (L2距离): {score:.4f} | 内容预览: {doc.page_content[:30]}...")
+                    # 放宽阈值到 1.3，以召回更多潜在相关的知识库内容
+                    if score < 1.3: 
+                        source_docs.append(doc)
                 
-                if search_results:
-                    print(f"原始检索结果数量: {len(search_results)}, 最高得分: {search_results[0][1]:.4f}")
-                    if source_docs:
-                        print(f"过滤后保留文档数量: {len(source_docs)}")
-                    else:
-                        print("分值过低，已过滤所有检索结果，转为模型直接回答")
+                if not source_docs and search_results:
+                    print("⚠️ 所有结果距离均大于 1.3，判定为不相关，转为大模型回答")
                 
             except Exception as e:
                 print(f"检索器调用失败: {str(e)}")
@@ -846,7 +844,7 @@ def get_conversation_id(request: Request) -> str:
     
     # 如果没有找到会话ID，生成一个新的
     if not conversation_id:
-        conversation_id = str(datetime.now().timestamp())
+        conversation_id = f"sess_{int(datetime.now().timestamp())}_{os.urandom(4).hex()}"
     
     # 如果是新的会话ID，初始化
     if conversation_id not in conversation_store:
@@ -856,401 +854,6 @@ def get_conversation_id(request: Request) -> str:
         }
     
     return conversation_id
-
-@app.get("/")
-async def root():
-    """健康检查端点"""
-    current_time = datetime.now().isoformat()
-    return {
-        "status": "ok", 
-        "message": "AI课程助教系统正在运行",
-        "version": "1.0.0",
-        "rag_status": "enabled" if retriever else "disabled",
-        "timestamp": current_time
-    }
-
-# 用户注册
-@app.post("/api/register")
-async def register(user: UserRegister, db: AsyncSession = Depends(get_db)):
-    print(f"收到注册请求: {user.username}, 邮箱: {user.email}, 角色: {user.role}")
-    # 检查用户名是否已存在
-    result = await db.execute(select(UserModel).where(UserModel.username == user.username))
-    if result.scalars().first():
-        raise HTTPException(status_code=400, detail="Username already registered")
-    
-    # 检查邮箱是否已存在
-    result = await db.execute(select(UserModel).where(UserModel.email == user.email))
-    if result.scalars().first():
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    # 创建新用户
-    hashed_password = get_password_hash(user.password)
-    # 限制角色只能是 admin 或 student
-    final_role = user.role if user.role in ["admin", "student"] else "student"
-    new_user = UserModel(
-        username=user.username, 
-        email=user.email, 
-        hashed_password=hashed_password, 
-        role=final_role,
-        status="active" # 明确设置初始状态
-    )
-    db.add(new_user)
-    await db.commit()
-    return {"message": "User registered successfully"}
-
-# 用户登录
-@app.post("/api/login")
-async def login(user: UserLogin, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(UserModel).where(UserModel.username == user.username))
-    db_user = result.scalars().first()
-    
-    if not db_user or not verify_password(user.password, db_user.hashed_password):
-        raise HTTPException(status_code=401, detail="Incorrect username or password")
-    
-    # 检查用户是否被封禁
-    if db_user.status == "disabled":
-        raise HTTPException(status_code=403, detail="Your account has been disabled")
-    
-    access_token = create_access_token(data={"sub": str(db_user.id)})
-    return {
-        "access_token": access_token, 
-        "token_type": "bearer", 
-        "username": db_user.username,
-        "role": db_user.role
-    }
-
-# 忘记密码 - 发送验证码
-@app.post("/api/forgot-password")
-async def forgot_password(request: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
-    try:
-        print(f"尝试找回密码，邮箱: {request.email}")
-        result = await db.execute(select(UserModel).where(UserModel.email == request.email))
-        user = result.scalars().first()
-        
-        if not user:
-            print(f"找回密码失败: 未找到邮箱为 {request.email} 的用户")
-            # 出于安全考虑，对外返回成功，但控制台记录真实情况
-            return {"message": "If the email exists, a reset code has been sent."}
-        
-        # 生成 6 位随机验证码
-        import random
-        reset_code = ''.join([str(random.randint(0, 9)) for _ in range(6)])
-        
-        # 设置过期时间（10分钟后）
-        user.reset_code = reset_code
-        user.reset_code_expires = datetime.utcnow() + timedelta(minutes=10)
-        
-        await db.commit()
-        
-        # 模拟发送邮件 - 在控制台打印验证码
-        print(f"\n{'='*30}")
-        print(f"找回密码验证码: {reset_code}")
-        print(f"{'='*30}\n")
-        
-        return {"message": "Reset code sent to your email (simulated in console)."}
-    except Exception as e:
-        print(f"找回密码接口内部错误: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"数据库查询失败，请检查是否删除了旧的 .db 文件: {str(e)}")
-
-# 重置密码
-@app.post("/api/reset-password")
-async def reset_password(request: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(UserModel).where(UserModel.email == request.email))
-    user = result.scalars().first()
-    
-    if not user or user.reset_code != request.code:
-        raise HTTPException(status_code=400, detail="Invalid email or code")
-    
-    if user.reset_code_expires < datetime.utcnow():
-        raise HTTPException(status_code=400, detail="Reset code has expired")
-    
-    # 更新密码
-    user.hashed_password = get_password_hash(request.new_password)
-    user.reset_code = None  # 清除验证码
-    user.reset_code_expires = None
-    
-    await db.commit()
-    return {"message": "Password has been reset successfully"}
-
-# --- 用户管理模块开始 ---
-
-# 用户管理接口：获取当前登录用户信息
-@app.get("/api/user/me")
-async def get_my_info(user: UserModel = Depends(get_active_user)):
-    return {
-        "id": user.id,
-        "username": user.username,
-        "email": user.email,
-        "role": user.role,
-        "status": user.status,
-        "created_at": user.created_at.isoformat() if user.created_at else None
-    }
-
-# 管理员接口：获取所有用户列表
-@app.get("/api/admin/users")
-async def get_all_users(
-    admin: UserModel = Depends(get_current_admin_v2),
-    db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(select(UserModel).order_by(UserModel.id.desc()))
-    users = result.scalars().all()
-    return [{
-        "id": u.id,
-        "username": u.username,
-        "email": u.email,
-        "role": u.role,
-        "status": u.status,
-        "created_at": u.created_at.isoformat() if u.created_at else None
-    } for u in users]
-
-# 管理员接口：查看某个用户详情
-@app.get("/api/admin/users/{user_id}")
-async def get_user_detail(
-    user_id: int,
-    admin: UserModel = Depends(get_current_admin_v2),
-    db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(select(UserModel).where(UserModel.id == user_id))
-    user = result.scalars().first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    return {
-        "id": user.id,
-        "username": user.username,
-        "email": user.email,
-        "role": user.role,
-        "status": user.status,
-        "created_at": user.created_at.isoformat() if user.created_at else None
-    }
-
-# 管理员接口：封禁/解封用户
-@app.post("/api/admin/ban_user")
-async def update_user_status(
-    request: UserStatusUpdate,
-    admin: UserModel = Depends(get_current_admin_v2),
-    db: AsyncSession = Depends(get_db)
-):
-    if request.status not in ["active", "disabled"]:
-        raise HTTPException(status_code=400, detail="Invalid status. Must be 'active' or 'disabled'")
-    
-    result = await db.execute(select(UserModel).where(UserModel.id == request.user_id))
-    user = result.scalars().first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    if user.id == admin.id:
-        raise HTTPException(status_code=400, detail="You cannot ban yourself")
-    
-    user.status = request.status
-    await db.commit()
-    return {"message": f"User status updated to {request.status}"}
-
-# 用户管理模块结束 ---
-
-# --- 用户个人信息维护模块开始 ---
-
-# 修改个人基本信息
-@app.put("/api/user/update")
-async def update_user_info(
-    request: UserUpdate,
-    user: UserModel = Depends(get_active_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    用户修改个人基本信息 (支持修改 username 和 email)
-    """
-    try:
-        updated = False
-        
-        # 1. 处理用户名修改
-        if request.username is not None and request.username != user.username:
-            # 检查用户名是否已被占用
-            result = await db.execute(select(UserModel).where(UserModel.username == request.username))
-            if result.scalars().first():
-                raise HTTPException(status_code=400, detail="Username already exists")
-            user.username = request.username
-            updated = True
-            
-        # 2. 处理邮箱修改
-        if request.email is not None and request.email != user.email:
-            # 检查邮箱是否已被占用
-            result = await db.execute(select(UserModel).where(UserModel.email == request.email))
-            if result.scalars().first():
-                raise HTTPException(status_code=400, detail="Email already registered by another user")
-            user.email = request.email
-            updated = True
-            
-        if not updated:
-            return {"message": "No changes provided"}
-            
-        await db.commit()
-        await db.refresh(user)
-        
-        return {
-            "message": "User information updated successfully",
-            "user": {
-                "id": user.id,
-                "username": user.username,
-                "email": user.email,
-                "role": user.role,
-                "status": user.status
-            }
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        await db.rollback()
-        print(f"更新用户信息失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to update user information: {str(e)}")
-
-# 修改密码
-@app.post("/api/user/change-password")
-async def change_password(
-    request: PasswordChange,
-    user: UserModel = Depends(get_active_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    用户在登录状态下修改密码
-    """
-    try:
-        # 1. 校验旧密码
-        if not verify_password(request.old_password, user.hashed_password):
-            raise HTTPException(status_code=400, detail="Incorrect old password")
-        
-        # 2. 加密并保存新密码
-        user.hashed_password = get_password_hash(request.new_password)
-        
-        await db.commit()
-        return {"message": "Password updated successfully"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        await db.rollback()
-        print(f"修改密码失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to update password: {str(e)}")
-
-# --- 用户个人信息维护模块结束 ---
-
-@app.post("/api/chat")
-async def chat(
-    request: ChatRequest, 
-    user_id: int = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
-    conversation_id: str = Depends(get_conversation_id)
-):
-    """非流式聊天API端点"""
-    try:
-        # 打印接收到的请求信息
-        print(f"非流式请求 - 消息: '{request.message}', 会话ID: {conversation_id}")
-        
-        try:
-            model = ChatTongyi(model_name="qwen-turbo")
-        except Exception as e:
-            print(f"模型初始化失败: {str(e)}")
-            # 返回错误响应
-            return {
-                "response": _generate_fallback_response(request.message, request.chat_history),
-                "conversation_id": conversation_id,
-                "error": f"模型初始化失败: {str(e)}"
-            }
-        
-        # 处理聊天历史，可能是Pydantic模型或已经是字典列表
-        chat_history = []
-        if request.chat_history:
-            # 转换Message对象为字典
-            for msg in request.chat_history:
-                if isinstance(msg, dict):
-                    chat_history.append(msg)
-                elif hasattr(msg, "role") and hasattr(msg, "content"):
-                    chat_history.append({
-                        "role": msg.role,
-                        "content": msg.content,
-                        "timestamp": msg.timestamp if hasattr(msg, "timestamp") else None
-                    })
-        
-        # 如果是新的会话，获取聊天历史
-        current_chat_history = []
-        if conversation_id in conversation_store:
-            current_chat_history = conversation_store[conversation_id]["messages"]
-        
-        # 合并当前会话历史和请求中的历史 - 优先使用请求中的历史，如果没有则使用服务器存储的历史
-        if not chat_history and current_chat_history:
-            chat_history = current_chat_history
-        
-        # 打印历史长度
-        print(f"使用的历史消息数量: {len(chat_history)}")
-        
-        # 使用智能回答函数处理请求
-        response_result = await smart_answer(request.message, model, chat_history)
-        if isinstance(response_result, tuple):
-            response_content, response_meta = response_result
-        else:
-            response_content = response_result
-            response_meta = {
-                "source": "llm",
-                "source_label": "仅来自于大模型"
-            }
-        print(f"生成的回答: '{response_content[:50]}...'(长度:{len(response_content)})")
-        
-        # 保存到内存会话，供前端实时会话与历史回放使用
-        if conversation_id not in conversation_store:
-            conversation_store[conversation_id] = {"messages": []}
-        conversation_store[conversation_id]["messages"].append({
-            "role": "user",
-            "content": request.message,
-            "timestamp": datetime.utcnow().isoformat()
-        })
-        conversation_store[conversation_id]["messages"].append({
-            "role": "assistant",
-            "content": response_content,
-            "source_label": response_meta.get("source_label"),
-            "matched_docs": response_meta.get("matched_docs"),
-            "timestamp": datetime.utcnow().isoformat()
-        })
-        print(f"会话 {conversation_id} 已写入内存历史，当前消息数: {len(conversation_store[conversation_id]['messages'])}")
-        
-        # 保存用户消息到数据库
-        user_msg = ChatHistoryModel(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            role="user",
-            content=request.message,
-            timestamp=datetime.utcnow()
-        )
-        db.add(user_msg)
-        
-        # 保存助手消息到数据库
-        assistant_msg = ChatHistoryModel(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            role="assistant",
-            content=response_content,
-            source_label=response_meta.get("source_label"),
-            matched_docs=json.dumps(response_meta.get("matched_docs")) if response_meta.get("matched_docs") else None,
-            timestamp=datetime.utcnow() + timedelta(milliseconds=10)
-        )
-        db.add(assistant_msg)
-        await db.commit()
-        
-        return {
-            "response": response_content,
-            "conversation_id": conversation_id,
-            "response_meta": response_meta
-        }
-        
-    except Exception as e:
-        error_msg = f"聊天API端点错误: {str(e)}"
-        print(error_msg)
-        print(f"错误详情: {type(e).__name__}, {e.__traceback__.tb_lineno}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": str(e)}
-        )
 
 @app.post("/api/chat/stream")
 @app.get("/api/chat/stream")
@@ -1262,22 +865,24 @@ async def chat_stream(
 ):
     """流式聊天API端点 - 支持POST和GET请求"""
     try:
-        # 尝试从请求头或查询参数获取用户ID
+        # 严格获取用户ID
         user_id = None
+        auth_token = token
+        
         if request_raw and "Authorization" in request_raw.headers:
             auth_header = request_raw.headers["Authorization"]
             if auth_header.startswith("Bearer "):
-                token_from_header = auth_header.split(" ")[1]
-                user_id = await get_current_user_id_optional(token_from_header)
-        elif token:
-            user_id = await get_current_user_id_optional(token)
+                auth_token = auth_header.split(" ")[1]
+        
+        if auth_token:
+            user_id = await get_current_user_id_optional(auth_token)
+
+        if not user_id:
+            print(f"❌ 拒绝流式请求: 会话 {conversation_id} 未提供有效 Token")
+            return JSONResponse(status_code=401, content={"error": "Not authenticated"})
 
         effective_user_id = user_id
 
-        if not effective_user_id:
-            print("警告: 流式请求未提供有效的身份验证信息")
-            # 在实际生产环境中，这里应该抛出 401 错误
-            # raise HTTPException(status_code=401, detail="Not authenticated")
         # 如果是GET请求，尝试从查询参数获取消息，用于EventSource
         message = ""
         chat_history = []
@@ -1439,6 +1044,9 @@ async def chat_stream(
                         print(f"会话 {conversation_id} 已成功持久化到数据库")
 
                     # 更新内存记录助手消息
+                    if conversation_id not in conversation_store:
+                        conversation_store[conversation_id] = {"messages": []}
+                        
                     conversation_store[conversation_id]["messages"].append({
                         "role": "user",
                         "content": message,
@@ -1463,7 +1071,19 @@ async def chat_stream(
                     }
 
                 except Exception as e:
-                    yield {"event": "error", "data": json.dumps({"error": str(e)})}
+                    error_msg = str(e)
+                    # 即使模型报错，也尝试保存一条错误记录，防止会话“消失”
+                    async with async_session() as db_session:
+                        fail_history = ChatHistoryModel(
+                            conversation_id=conversation_id,
+                            user_id=effective_user_id,
+                            role="assistant",
+                            content=f"抱歉，系统暂时无法响应: {error_msg}",
+                            timestamp=datetime.utcnow()
+                        )
+                        db_session.add(fail_history)
+                        await db_session.commit()
+                    yield {"event": "error", "data": json.dumps({"error": error_msg})}
 
             except Exception as e:
                 error_msg = f"流式响应错误: {str(e)}"
@@ -1693,6 +1313,12 @@ async def delete_conversation(
             .where(ChatHistoryModel.conversation_id == conversation_id)
             .where(ChatHistoryModel.user_id == user_id)
         )
+        
+        # 同时从内存中删除
+        if conversation_id in conversation_store:
+            del conversation_store[conversation_id]
+            print(f"会话 {conversation_id} 已从内存中删除")
+            
         await db.commit()
         return {"status": "success", "message": f"Conversation {conversation_id} deleted"}
     except Exception as e:
@@ -2211,6 +1837,116 @@ async def get_knowledge_analysis(
         coverage_rate=round(coverage_rate, 2),
         keyword_details=keyword_details
     )
+
+
+# --- 用户管理模块开始 ---
+
+@app.get("/api/admin/users")
+async def get_all_users(
+    admin: UserModel = Depends(get_current_admin_v2),
+    db: AsyncSession = Depends(get_db)
+):
+    """管理员：获取所有用户列表"""
+    result = await db.execute(select(UserModel).order_by(UserModel.created_at.desc()))
+    users = result.scalars().all()
+    
+    return [
+        {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "role": user.role,
+            "status": user.status,
+            "created_at": user.created_at.isoformat() if user.created_at else None
+        }
+        for user in users
+    ]
+
+@app.put("/api/admin/users/{user_id}/status")
+async def update_user_status(
+    user_id: int,
+    request: dict,
+    admin: UserModel = Depends(get_current_admin_v2),
+    db: AsyncSession = Depends(get_db)
+):
+    """管理员：更新用户状态（激活/禁用）"""
+    new_status = request.get("status")
+    if new_status not in ["active", "disabled"]:
+        raise HTTPException(status_code=400, detail="Invalid status")
+        
+    result = await db.execute(select(UserModel).where(UserModel.id == user_id))
+    user = result.scalars().first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    user.status = new_status
+    await db.commit()
+    return {"message": f"User status updated to {new_status}"}
+
+# --- 用户管理模块结束 ---
+
+
+# --- 用户个人信息维护模块开始 ---
+
+@app.get("/api/user/me")
+async def get_my_info(
+    user: UserModel = Depends(get_active_user)
+):
+    """获取当前登录用户信息"""
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "role": user.role,
+        "status": user.status,
+        "created_at": user.created_at.isoformat() if user.created_at else None
+    }
+
+@app.put("/api/user/update")
+async def update_my_info(
+    request: dict,
+    user: UserModel = Depends(get_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """修改当前用户信息"""
+    username = request.get("username")
+    email = request.get("email")
+    
+    if username:
+        # 检查用户名是否冲突
+        result = await db.execute(select(UserModel).where(UserModel.username == username, UserModel.id != user.id))
+        if result.scalars().first():
+            raise HTTPException(status_code=400, detail="Username already taken")
+        user.username = username
+        
+    if email:
+        user.email = email
+        
+    await db.commit()
+    return {"message": "User info updated successfully"}
+
+@app.post("/api/user/change-password")
+async def change_my_password(
+    request: dict,
+    user: UserModel = Depends(get_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """修改当前用户密码"""
+    old_password = request.get("old_password")
+    new_password = request.get("new_password")
+    
+    if not old_password or not new_password:
+        raise HTTPException(status_code=400, detail="Missing password fields")
+        
+    if not verify_password(old_password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="Incorrect old password")
+        
+    user.hashed_password = get_password_hash(new_password)
+    await db.commit()
+    return {"message": "Password changed successfully"}
+
+# --- 用户个人信息维护模块结束 ---
 
 
 # --- 反馈模块结束 ---
