@@ -28,10 +28,15 @@ const Login: React.FC = () => {
       const response = await axios.post('http://127.0.0.1:8088/api/login', {
         username,
         password,
+      }, {
+        headers: {
+          'Content-Type': 'application/json'
+        }
       });
       console.log('登录响应成功:', response.data);
 
-      const { access_token, username: loggedInUsername, role } = response.data;
+      const { access_token, user } = response.data;
+      const { username: loggedInUsername, role } = user;
       
       // 保存到本地存储
       localStorage.setItem('token', access_token);

@@ -20,9 +20,20 @@ function App() {
   useEffect(() => {
     const syncAuthState = () => {
       const token = localStorage.getItem('token');
+      const username = localStorage.getItem('username');
+      const role = localStorage.getItem('role');
+      
       setIsAuthenticated(!!token);
-      setUsername(localStorage.getItem('username'));
-      setUserRole(localStorage.getItem('role'));
+      setUsername(username);
+      setUserRole(role);
+      
+      // 调试信息
+      console.log('Auth state sync:', {
+        token: !!token,
+        username,
+        role,
+        isAuthenticated: !!token
+      });
     };
 
     const handleVisibilityAndFocus = () => {
@@ -67,13 +78,11 @@ function App() {
               <span className="app-name">QAI Bot</span>
               <Link to="/" className="nav-link">对话</Link>
               {userRole === 'admin' && (
-                <Link to="/admin/knowledge" className="nav-link">知识库管理</Link>
-              )}
-              {userRole === 'admin' && (
-                <Link to="/admin/users" className="nav-link">用户管理</Link>
-              )}
-              {userRole === 'admin' && (
-                <Link to="/admin/analysis" className="nav-link">数据分析</Link>
+                <>
+                  <Link to="/admin/knowledge" className="nav-link">知识库管理</Link>
+                  <Link to="/admin/users" className="nav-link">用户管理</Link>
+                  <Link to="/admin/analysis" className="nav-link">数据分析</Link>
+                </>
               )}
             </div>
             <div className="user-menu">

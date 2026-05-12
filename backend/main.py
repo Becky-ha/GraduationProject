@@ -29,7 +29,8 @@ from auth import get_password_hash, verify_password, create_access_token, get_cu
 
 # LangChain导入
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_community.chat_models import ChatTongyi
+from openai import OpenAI
+from langchain_community.chat_models import ChatOpenAI
 from langchain_community.document_loaders import (
     TextLoader, 
     PyPDFLoader, 
@@ -46,6 +47,9 @@ from langchain_core.embeddings import Embeddings
 
 # 加载环境变量
 load_dotenv()
+
+# JWT配置
+ACCESS_TOKEN_EXPIRE_MINUTES = 30  # Token过期时间（分钟）
 
 # 获取DashScope API Key
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
@@ -97,9 +101,10 @@ try:
     embeddings = None
     try:
         from langchain_community.embeddings.dashscope import DashScopeEmbeddings
-        embeddings = DashScopeEmbeddings(model="text-embedding-v1")
+        embeddings = DashScopeEmbeddings(model="tongyi-embedding-vision-flash-2026-03-06")
         test_vector = embeddings.embed_query("embedding health check")
         print(f"DashScope嵌入模型初始化成功，向量维度: {len(test_vector)}")
+        print("使用新模型: tongyi-embedding-vision-flash-2026-03-06")
     except Exception as e:
         print(f"DashScope嵌入模型不可用，改用本地降级嵌入: {str(e)}")
         embeddings = LocalFallbackEmbeddings()
@@ -172,8 +177,8 @@ app = FastAPI(title="QAI Bot", lifespan=lifespan)
 # 添加CORS中间件
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -382,6 +387,20 @@ async def process_file_background(file_id: int):
             except:
                 pass
 
+# 清理旧向量库（当嵌入模型变更时使用）
+def clear_old_vector_store():
+    """清理旧的向量库数据"""
+    try:
+        import shutil
+        if os.path.exists(CHROMA_PERSIST_DIR):
+            print(f"🗑️ 正在清理旧向量库: {CHROMA_PERSIST_DIR}")
+            shutil.rmtree(CHROMA_PERSIST_DIR)
+            print("✅ 旧向量库清理完成")
+        else:
+            print("📁 未找到旧向量库，无需清理")
+    except Exception as e:
+        print(f"❌ 清理向量库失败: {str(e)}")
+
 # 初始化RAG组件
 def initialize_rag(force_rebuild=False):
     # 如果嵌入模型初始化失败，则不初始化RAG
@@ -400,9 +419,17 @@ def initialize_rag(force_rebuild=False):
                     collection_name="qai_bot_knowledge"
                 )
                 print(f"成功加载本地向量库，包含约 {vectorstore._collection.count()} 个文本块")
+                
+                # 检查嵌入模型是否匹配
+                test_vector = embeddings.embed_query("test")
+                print(f"当前嵌入模型向量维度: {len(test_vector)}")
+                
                 return vectorstore
             except Exception as load_err:
                 print(f"加载本地向量库失败，将重新构建: {str(load_err)}")
+                print("⚠️ 可能是由于嵌入模型变更导致向量不兼容")
+                # 强制重建向量库
+                force_rebuild = True
 
         print("未检测到本地向量库或强制重构，开始解析文档并构建向量库...")
         # 尝试找到文件路径
@@ -482,6 +509,46 @@ async def get_current_admin_v2(
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Only administrators can perform this action")
     return user
+
+# 用户登录
+@app.post("/api/login")
+async def login(
+    user: UserLogin,
+    db: AsyncSession = Depends(get_db)
+):
+    """用户登录"""
+    # 查找用户
+    result = await db.execute(select(UserModel).where(UserModel.username == user.username))
+    db_user = result.scalars().first()
+    
+    if not db_user:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    # 验证密码
+    if not verify_password(user.password, db_user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    # 检查用户状态
+    if db_user.status == "disabled":
+        raise HTTPException(status_code=403, detail="Account is disabled")
+    
+    # 生成访问令牌
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": str(db_user.id)}, expires_delta=access_token_expires
+    )
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": db_user.id,
+            "username": db_user.username,
+            "email": db_user.email,
+            "role": db_user.role,
+            "status": db_user.status
+        }
+    }
 
 # 用户注册
 @app.post("/api/register")
@@ -694,21 +761,37 @@ async def smart_answer(question, model, chat_history=None):
         if vectorstore:
             try:
                 # 使用 similarity_search_with_score，它返回的是原始 L2 距离
-                # 注意：距离越小越相似。对于 DashScope v3，通常距离 < 1.0 都是非常相关的
-                search_results = vectorstore.similarity_search_with_score(question, k=3)
+                # 注意：距离越小越相似。对于 DashScope v3，通常距离 < 0.8 都是非常相关的
+                search_results = vectorstore.similarity_search_with_score(question, k=5)  # 增加检索数量
                 
-                # 过滤策略：
-                # 1. 距离小于 0.8 的视为高度相关
-                # 2. 或者直接取最相似的前 2 条（只要它们不是完全不相关）
+                # 改进的过滤策略：
                 source_docs = []
                 for doc, score in search_results:
                     print(f"🔍 检索分值 (L2距离): {score:.4f} | 内容预览: {doc.page_content[:30]}...")
-                    # 放宽阈值到 1.3，以召回更多潜在相关的知识库内容
-                    if score < 1.3: 
+                    # 严格阈值：只有距离 < 0.9 的才视为相关
+                    if score < 0.9: 
                         source_docs.append(doc)
                 
-                if not source_docs and search_results:
-                    print("⚠️ 所有结果距离均大于 1.3，判定为不相关，转为大模型回答")
+                # 如果没有找到足够相关的文档，尝试多样性检索
+                if len(source_docs) < 2 and len(search_results) >= 2:
+                    print("🔄 相关文档不足，尝试多样性检索...")
+                    # 取距离相对较小且内容不同的文档
+                    for doc, score in search_results[2:5]:  # 检查第3-5个结果
+                        if score < 1.2 and len(source_docs) < 3:
+                            # 简单的内容去重检查
+                            content_similar = False
+                            for existing_doc in source_docs:
+                                if doc.page_content[:50] in existing_doc.page_content or existing_doc.page_content[:50] in doc.page_content:
+                                    content_similar = True
+                                    break
+                            if not content_similar:
+                                source_docs.append(doc)
+                                print(f"🎯 添加多样性文档: {doc.page_content[:30]}...")
+                
+                if not source_docs:
+                    print("⚠️ 未找到相关文档，转为大模型回答")
+                else:
+                    print(f"✅ 找到 {len(source_docs)} 个相关文档")
                 
             except Exception as e:
                 print(f"检索器调用失败: {str(e)}")
@@ -739,13 +822,17 @@ async def smart_answer(question, model, chat_history=None):
                     role_name = "用户" if role == "user" else "AI助手"
                     history_context += f"{role_name}: {content}\n"
 
-            rag_chain = rag_prompt | model | StrOutputParser()
             try:
+                print(f"准备调用 RAG 链，模型类型: {type(model)}")
+                rag_chain = rag_prompt | model | StrOutputParser()
+                print("RAG 链创建成功")
+                
                 answer = await rag_chain.ainvoke({
                     "context": context,
                     "question": question,
                     "history_context": history_context
                 })
+                print(f"RAG 链调用成功，回答长度: {len(answer) if answer else 0}")
                 
                 # 提取引用的文档信息
                 matched_docs = []
@@ -774,7 +861,19 @@ async def smart_answer(question, model, chat_history=None):
         messages.append(HumanMessage(content=question))
         print(f"未命中知识库，使用大模型回答，历史消息数量: {len(messages)-1}")
         try:
-            answer = model.invoke(messages).content
+            print(f"准备调用模型，消息数量: {len(messages)}")
+            print(f"模型对象: {type(model)}")
+            
+            # ChatOpenAI 可以直接使用 LangChain 消息格式
+            response = model.invoke(messages)
+            print(f"模型响应类型: {type(response)}")
+            print(f"模型响应内容: {response}")
+            
+            if hasattr(response, 'content'):
+                answer = response.content
+            else:
+                answer = str(response)
+                
             response_meta = {
                 "source": "llm",
                 "source_label": "仅来自于大模型"
@@ -782,6 +881,9 @@ async def smart_answer(question, model, chat_history=None):
             return answer, response_meta
         except Exception as e:
             print(f"模型调用失败: {str(e)}")
+            print(f"错误类型: {type(e).__name__}")
+            import traceback
+            traceback.print_exc()
             return _generate_fallback_response(question, chat_history), {
                 "source": "fallback",
                 "source_label": "仅来自于大模型"
@@ -1002,7 +1104,13 @@ async def chat_stream(
                 
                 print(f"开始处理流式响应...")
                 try:
-                    model = ChatTongyi(model_name="qwen-turbo")
+                    print("正在初始化 ChatOpenAI 模型...")
+                    print(f"API Key 状态: {'已设置' if DASHSCOPE_API_KEY else '未设置'}")
+                    model = ChatOpenAI(
+                        api_key=DASHSCOPE_API_KEY,
+                        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                        model_name="qwen3.6-flash"
+                    )
                     print("模型初始化成功")
                     
                     # 调用智能回答
@@ -1011,7 +1119,7 @@ async def chat_stream(
                         full_response, response_meta = response_result
                     else:
                         full_response = response_result
-                    
+                        
                     # 逐字发送
                     for char in full_response:
                         yield {
@@ -1019,7 +1127,7 @@ async def chat_stream(
                             "data": char
                         }
                         await asyncio.sleep(0.01)
-                    
+                        
                     # --- 关键：先持久化到数据库，再发送结束元数据 ---
                     async with async_session() as db_session:
                         user_history = ChatHistoryModel(
@@ -1042,6 +1150,31 @@ async def chat_stream(
                         db_session.add(assistant_history)
                         await db_session.commit()
                         print(f"会话 {conversation_id} 已成功持久化到数据库")
+                        
+                except Exception as model_error:
+                    print(f"模型初始化或调用失败: {str(model_error)}")
+                    print(f"错误类型: {type(model_error).__name__}")
+                    import traceback
+                    traceback.print_exc()
+                    
+                    # 发送错误信息
+                    error_message = "模型服务暂时不可用，请稍后重试。"
+                    for char in error_message:
+                        yield {
+                            "event": "message",
+                            "data": char
+                        }
+                        await asyncio.sleep(0.01)
+                    
+                    yield {
+                        "event": "done",
+                        "data": json.dumps({
+                            "message": "Error occurred", 
+                            "conversation_id": conversation_id,
+                            "error": str(model_error)
+                        })
+                    }
+                    return
 
                     # 更新内存记录助手消息
                     if conversation_id not in conversation_store:
@@ -1506,7 +1639,11 @@ async def update_question_clusters():
             top_clusters = clusters[:20]  # 取前 20 个
             
             cluster_results = []
-            model = ChatTongyi(model_name="qwen-turbo")
+            model = ChatOpenAI(
+                api_key=DASHSCOPE_API_KEY,
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                model_name="qwen3.6-flash"
+            )
             
             for idx, c in enumerate(top_clusters):
                 # 提取唯一示例
@@ -1526,9 +1663,10 @@ async def update_question_clusters():
 核心意图标题："""
                 
                 try:
-                    represent = (await model.ainvoke(prompt)).content.strip()
+                    response = model.invoke(prompt)
+                    represent = response.content.strip()
                     # 去除引号或句号
-                    represent = represent.replace('"', '').replace('“', '').replace('”', '').replace('。', '')
+                    represent = represent.replace('"', '').replace('"', '').replace('"', '').replace('。', '')
                     print(f"   - 类簇 {idx+1}: '{represent}' (成员数: {c['count']})")
                 except Exception as e:
                     print(f"   - 类簇 {idx+1}: LLM 提炼失败，使用首条提问。错误: {str(e)}")
